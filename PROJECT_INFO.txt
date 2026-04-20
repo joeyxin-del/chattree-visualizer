@@ -1,0 +1,73 @@
+========================================
+  ChatTree Visualizer - Demo 项目
+========================================
+
+✅ 项目已创建完成！
+
+📁 项目位置：
+E:\002project\014moltbot\tree-visualizer
+
+📦 包含内容：
+  ✓ 前端 (React + TypeScript + React Flow)
+  ✓ 后端 (FastAPI + Claude API)
+  ✓ 完整文档
+  ✓ 启动脚本
+
+🚀 快速启动：
+
+  方式一：一键启动
+  ----------------
+  双击运行：start-all.cmd
+
+  方式二：分别启动
+  ----------------
+  1. 双击运行：start-backend.cmd
+  2. 双击运行：start-frontend.cmd
+
+⚠️  首次运行前必须配置：
+  ----------------
+  编辑 backend\.env 文件
+  填入你的 ANTHROPIC_API_KEY
+
+  详见：API_KEY_SETUP.md
+
+📖 文档：
+  ----------------
+  README_DEMO.md      - 项目说明
+  QUICKSTART.md       - 快速启动指南
+  API_KEY_SETUP.md    - API Key 配置
+  docs/               - 详细技术文档
+
+🌐 访问地址：
+  ----------------
+  前端：http://localhost:5173
+  后端：http://localhost:8000
+  API 文档：http://localhost:8000/docs
+
+💡 功能特性：
+  ----------------
+  ✓ 树形对话可视化
+  ✓ 实时流式响应
+  ✓ 分支对话创建
+  ✓ 节点选择聚焦
+  ✓ 暗色模式支持
+
+🎯 使用方法：
+  ----------------
+  1. 在右侧输入框输入消息
+  2. 按 Enter 发送
+  3. 点击任意节点创建分支
+  4. 拖拽画布、滚轮缩放
+
+📝 下一步：
+  ----------------
+  1. 配置 API Key (backend\.env)
+  2. 运行 start-all.cmd
+  3. 访问 http://localhost:5173
+  4. 开始对话！
+
+🐛 遇到问题？
+  ----------------
+  查看 QUICKSTART.md 的故障排除部分
+
+========================================
