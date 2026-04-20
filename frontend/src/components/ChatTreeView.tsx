@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useChatTreeStore } from '../store/chatTreeStore';
 import { useWebSocket, createSession } from '../hooks/useWebSocket';
 import { BranchVisualizer } from './BranchVisualizer';
@@ -12,6 +12,7 @@ export function ChatTreeView() {
   const { sendMessage } = useWebSocket(sessionKey);
   const [inputMessage, setInputMessage] = useState('');
   const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
+  const pendingBranchRef = useRef<{ parentId: string; since: number; firstMessage: string } | null>(null);
 
   // 初始化会话（开发环境走 Vite 代理 /api -> :8000，需先启动后端）
   useEffect(() => {
@@ -66,11 +67,40 @@ export function ChatTreeView() {
     setCurrentNodeId(nodeId);
   }, []);
 
-  // 创建新分支
-  const handleCreateBranch = useCallback((nodeId: string) => {
-    setCurrentNodeId(nodeId);
-    // 用户可以在输入框输入新消息来创建分支
-  }, []);
+  // 从某条消息分叉：发送首条用户消息并带上分支标签（左侧缩略图展示）
+  const handleSubmitBranchFromMessage = useCallback(
+    (parentNodeId: string, message: string, branchLabel?: string) => {
+      pendingBranchRef.current = {
+        parentId: parentNodeId,
+        since: Date.now() / 1000 - 0.05,
+        firstMessage: message,
+      };
+      sendMessage({
+        type: 'chat',
+        parent_node_id: parentNodeId,
+        message,
+        branch_label: branchLabel?.trim() || undefined,
+      });
+    },
+    [sendMessage]
+  );
+
+  // 新分支的用户节点到达后，切换到该分支以便继续对话并刷新左侧树
+  useEffect(() => {
+    const p = pendingBranchRef.current;
+    if (!p) return;
+    const candidates = Array.from(nodes.values()).filter(
+      (n) =>
+        n.parent_id === p.parentId &&
+        n.role === 'user' &&
+        n.content === p.firstMessage &&
+        n.timestamp >= p.since - 2
+    );
+    if (candidates.length === 0) return;
+    const newest = candidates.reduce((a, b) => (a.timestamp > b.timestamp ? a : b));
+    setCurrentNodeId(newest.id);
+    pendingBranchRef.current = null;
+  }, [nodes]);
 
   // 自动选择最新的叶子节点
   useEffect(() => {
@@ -125,7 +155,7 @@ export function ChatTreeView() {
         <div className="flex-1 flex flex-col">
           <ChatView
             messages={currentMessages}
-            onCreateBranch={handleCreateBranch}
+            onSubmitBranchFromMessage={handleSubmitBranchFromMessage}
           />
 
           {/* 输入框 */}
@@ -163,7 +193,7 @@ export function ChatTreeView() {
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground mt-2 text-center">
-                💡 提示：选中消息文字右键可创建新分支
+                💡 将鼠标移到某条用户或助手消息上，在气泡下点击「新建分支」
               </p>
             </div>
           </div>
