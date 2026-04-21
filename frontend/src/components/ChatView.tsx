@@ -61,8 +61,8 @@ export function ChatView({ messages, onSubmitBranchFromMessage }: ChatViewProps)
   }, [branchInputId, branchInputValue, onSubmitBranchFromMessage]);
 
   return (
-    <div className="flex-1 flex flex-col bg-gradient-to-b from-background to-muted/20">
-      <ScrollArea className="flex-1 px-4 py-6">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-gradient-to-b from-background to-muted/20">
+      <ScrollArea className="min-h-0 flex-1 px-4 py-6" type="always">
         <div className="max-w-4xl mx-auto space-y-6">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-[60vh] text-muted-foreground">
@@ -78,109 +78,127 @@ export function ChatView({ messages, onSubmitBranchFromMessage }: ChatViewProps)
               const showBranchInput = branchInputId === msg.id;
               const colAlign = isUser ? 'items-end' : 'items-start';
 
+              const avatar = (
+                <div
+                  className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${
+                    isUser
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-secondary text-secondary-foreground'
+                  }`}
+                >
+                  {isUser ? <User className="w-5 h-5" /> : <Bot className="w-5 h-5" />}
+                </div>
+              );
+
+              const messageBody = (
+                <div
+                  className={`w-full max-w-full flex flex-col ${colAlign}`}
+                  onMouseEnter={() => setHoveredId(msg.id)}
+                  onMouseLeave={() => {
+                    if (branchInputId !== msg.id) {
+                      setHoveredId((h) => (h === msg.id ? null : h));
+                    }
+                  }}
+                >
+                  <div
+                    className={`inline-block px-4 py-3 rounded-2xl shadow-sm ${
+                      isUser
+                        ? 'bg-primary text-primary-foreground rounded-tr-sm'
+                        : 'bg-card text-card-foreground border rounded-tl-sm'
+                    }`}
+                  >
+                    <div className="whitespace-pre-wrap select-text text-sm leading-relaxed">
+                      {msg.content || (
+                        <span className="italic opacity-50 flex items-center gap-2">
+                          <span className="inline-block w-2 h-2 bg-current rounded-full animate-pulse"></span>
+                          生成中...
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div
+                    className={`mt-2 w-full min-h-[40px] flex flex-col ${colAlign}`}
+                  >
+                    {showBranchBtn && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5 shadow-sm"
+                        onClick={() => {
+                          setBranchInputId(msg.id);
+                          setBranchInputValue('');
+                        }}
+                      >
+                        <GitBranch className="w-3.5 h-3.5" />
+                        新建分支
+                      </Button>
+                    )}
+                    {showBranchInput && (
+                      <div
+                        ref={branchPanelRef}
+                        className={`flex w-full max-w-md gap-2 items-center ${isUser ? 'ml-auto' : ''}`}
+                      >
+                        <input
+                          ref={branchInputRef}
+                          type="text"
+                          value={branchInputValue}
+                          onChange={(e) => setBranchInputValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              handleBranchSend();
+                            }
+                          }}
+                          placeholder="输入新分支的首条消息…"
+                          className="flex-1 min-w-0 h-9 px-3 rounded-md border border-input bg-background text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        />
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="shrink-0 gap-1"
+                          disabled={!branchInputValue.trim()}
+                          onClick={handleBranchSend}
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          发送
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div
+                    className={`text-xs text-muted-foreground mt-1 px-2 w-full ${isUser ? 'text-right' : 'text-left'}`}
+                  >
+                    {new Date(msg.timestamp * 1000).toLocaleTimeString('zh-CN', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </div>
+                </div>
+              );
+
               return (
                 <div
                   key={msg.id}
-                  className={`flex gap-4 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}
+                  className={`flex w-full gap-4 ${isUser ? 'flex-row justify-end' : 'flex-row'}`}
                 >
-                  <div
-                    className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${
-                      isUser
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-secondary text-secondary-foreground'
-                    }`}
-                  >
-                    {isUser ? <User className="w-5 h-5" /> : <Bot className="w-5 h-5" />}
-                  </div>
-
-                  <div className={`flex-1 max-w-3xl flex flex-col ${colAlign}`}>
-                    <div
-                      className="w-full max-w-full"
-                      onMouseEnter={() => setHoveredId(msg.id)}
-                      onMouseLeave={() => {
-                        if (branchInputId !== msg.id) {
-                          setHoveredId((h) => (h === msg.id ? null : h));
-                        }
-                      }}
-                    >
-                      <div
-                        className={`inline-block px-4 py-3 rounded-2xl shadow-sm ${
-                          isUser
-                            ? 'bg-primary text-primary-foreground rounded-tr-sm'
-                            : 'bg-card text-card-foreground border rounded-tl-sm'
-                        }`}
-                      >
-                        <div className="whitespace-pre-wrap select-text text-sm leading-relaxed">
-                          {msg.content || (
-                            <span className="italic opacity-50 flex items-center gap-2">
-                              <span className="inline-block w-2 h-2 bg-current rounded-full animate-pulse"></span>
-                              生成中...
-                            </span>
-                          )}
-                        </div>
+                  {isUser ? (
+                    <>
+                      <div className={`flex min-w-0 max-w-3xl flex-1 flex-col ${colAlign}`}>
+                        {messageBody}
                       </div>
-
-                      <div
-                        className={`mt-2 w-full min-h-[40px] flex flex-col ${colAlign}`}
-                      >
-                        {showBranchBtn && (
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="gap-1.5 shadow-sm"
-                            onClick={() => {
-                              setBranchInputId(msg.id);
-                              setBranchInputValue('');
-                            }}
-                          >
-                            <GitBranch className="w-3.5 h-3.5" />
-                            新建分支
-                          </Button>
-                        )}
-                        {showBranchInput && (
-                          <div
-                            ref={branchPanelRef}
-                            className="flex w-full max-w-md gap-2 items-center"
-                          >
-                            <input
-                              ref={branchInputRef}
-                              type="text"
-                              value={branchInputValue}
-                              onChange={(e) => setBranchInputValue(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' && !e.shiftKey) {
-                                  e.preventDefault();
-                                  handleBranchSend();
-                                }
-                              }}
-                              placeholder="输入新分支的首条消息…"
-                              className="flex-1 min-w-0 h-9 px-3 rounded-md border border-input bg-background text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                            />
-                            <Button
-                              type="button"
-                              size="sm"
-                              className="shrink-0 gap-1"
-                              disabled={!branchInputValue.trim()}
-                              onClick={handleBranchSend}
-                            >
-                              <Send className="w-3.5 h-3.5" />
-                              发送
-                            </Button>
-                          </div>
-                        )}
+                      {avatar}
+                    </>
+                  ) : (
+                    <>
+                      {avatar}
+                      <div className={`flex min-w-0 max-w-3xl flex-1 flex-col ${colAlign}`}>
+                        {messageBody}
                       </div>
-
-                      <div
-                        className={`text-xs text-muted-foreground mt-1 px-2 w-full ${isUser ? 'text-right' : 'text-left'}`}
-                      >
-                        {new Date(msg.timestamp * 1000).toLocaleTimeString('zh-CN', {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </div>
-                    </div>
-                  </div>
+                    </>
+                  )}
                 </div>
               );
             })

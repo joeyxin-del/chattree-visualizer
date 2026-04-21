@@ -151,8 +151,8 @@ export function ChatTreeView() {
           onNodeClick={handleNodeClick}
         />
 
-        {/* 中间：对话视图 */}
-        <div className="flex-1 flex flex-col">
+        {/* 中间：对话视图（min-h-0 让子项可收缩，聊天区才能出现纵向滚动） */}
+        <div className="flex min-h-0 flex-1 flex-col">
           <ChatView
             messages={currentMessages}
             onSubmitBranchFromMessage={handleSubmitBranchFromMessage}
