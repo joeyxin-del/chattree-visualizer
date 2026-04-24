@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { createPortal } from 'react-dom';
 import type { ChatNode } from '../types';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
+import { getTurnPreviewText } from '../utils/turnPreview';
 import { GitBranch } from 'lucide-react';
 
 interface BranchVisualizerProps {
@@ -26,7 +27,7 @@ interface VisualTurn {
 
 const MUTED = 'hsl(var(--muted))';
 
-/** 分支横轴：与 git 图类似，每个 branchIndex 一「轨」，不同分支不同列，避免多根线叠在同一条竖线上 */
+/** 分支横轴：与 git 图类似，每个 branchIndex 一「轨」，不同分支不同列，避免多根线叠在同一条竖线上。同一分叉点 — 最年长的子节点延续当前轨（排序后 index 0），较新的兄弟依次递增 forkSerial → 列更靠右（更外侧）。 */
 const LANE_X = (branchIndex: number) => 36 + branchIndex * 48;
 
 /** 纵排：略紧凑，仍保留胶囊与连线可读性 */
@@ -35,14 +36,33 @@ const ROW_TOP = 30;
 const ROW_BOTTOM_PAD = 46;
 const EDGE_Y_INSET = 8;
 
-/** Git Graph 式：只按创建时间。最早子节点延续当前列，其余子节点按时间渐新依次占更右的列（最新分叉在最外侧）。不用当前选中路径参与排轨，避免切换查看分支时整图列序乱跳。 */
-function orderForkChildren(childIds: string[], nodes: Map<string, ChatNode>): { continuation: string; others: string[] } {
-  const sorted = [...childIds].sort((a, b) => {
-    const ta = nodes.get(a)?.timestamp ?? 0;
-    const tb = nodes.get(b)?.timestamp ?? 0;
-    if (ta !== tb) return ta - tb;
+function messageSortKey(n: ChatNode | undefined): number {
+  if (!n) return 0;
+  const ext = n as ChatNode & { created_at?: number | string };
+  const ca = ext.created_at;
+  if (ca !== undefined && ca !== null) {
+    if (typeof ca === 'number' && Number.isFinite(ca)) return ca;
+    if (typeof ca === 'string') {
+      const t = Date.parse(ca);
+      if (Number.isFinite(t)) return t;
+    }
+  }
+  return n.timestamp ?? 0;
+}
+
+/** 按节点年龄排序子 id：优先可选 `created_at`（数字或 ISO），否则 `timestamp`；再按 id 字典序。 */
+function sortChildIdsByAge(nodes: Map<string, ChatNode>, childIds: string[]): string[] {
+  return [...childIds].sort((a, b) => {
+    const ka = messageSortKey(nodes.get(a));
+    const kb = messageSortKey(nodes.get(b));
+    if (ka !== kb) return ka - kb;
     return a.localeCompare(b);
   });
+}
+
+/** Git Graph 式：最早子节点延续当前列，其余按年龄渐新依次占更右的列（最新分叉在最外侧）。不用当前选中路径参与排轨，避免切换查看分支时整图列序乱跳。 */
+function orderForkChildren(childIds: string[], nodes: Map<string, ChatNode>): { continuation: string; others: string[] } {
+  const sorted = sortChildIdsByAge(nodes, childIds);
   if (sorted.length === 0) return { continuation: '', others: [] };
   return { continuation: sorted[0], others: sorted.slice(1) };
 }
@@ -105,8 +125,26 @@ function assignYByDepthAndTime(turns: VisualTurn[]): VisualTurn[] {
   return sorted.map((t, i) => ({ ...t, y: ROW_TOP + i * ROW_STEP }));
 }
 
+interface BranchHoverTip {
+  id: string;
+  text: string;
+  left: number;
+  top: number;
+}
+
 export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeClick }: BranchVisualizerProps) {
   const [hoveredTurn, setHoveredTurn] = useState<string | null>(null);
+  const [hoverTip, setHoverTip] = useState<BranchHoverTip | null>(null);
+  const tipLeaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearTipLeaveTimer = () => {
+    if (tipLeaveTimerRef.current !== null) {
+      clearTimeout(tipLeaveTimerRef.current);
+      tipLeaveTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => () => clearTipLeaveTimer(), []);
 
   const visualTurns = useMemo(() => {
     const result: VisualTurn[] = [];
@@ -121,9 +159,9 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
 
     /** 递增分叉序号：新分配的列单调向右，与 Git Graph「新支在最外侧」一致 */
     const sortedRoots = [...rootNodes].sort((a, b) => {
-      const ta = nodes.get(a)?.timestamp ?? 0;
-      const tb = nodes.get(b)?.timestamp ?? 0;
-      if (ta !== tb) return ta - tb;
+      const ka = messageSortKey(nodes.get(a));
+      const kb = messageSortKey(nodes.get(b));
+      if (ka !== kb) return ka - kb;
       return a.localeCompare(b);
     });
     let forkSerial = sortedRoots.length;
@@ -156,24 +194,23 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
           const ast = nodes.get(assistantId);
           if (ast?.children?.length) {
             const { continuation, others } = orderForkChildren(ast.children, nodes);
-            processFromNode(continuation, branchIndex);
+            if (continuation) processFromNode(continuation, branchIndex);
             for (const childId of others) {
               processFromNode(childId, forkSerial++);
             }
           }
         }
 
-        // 从用户消息直接分叉：子节点里是另一条「用户」链，不经过当前助手子树
-        const userForks = (node.children ?? [])
-          .filter((cid) => cid !== assistantId && nodes.get(cid)?.role === 'user')
-          .sort((a, b) => {
-            const ta = nodes.get(a)?.timestamp ?? 0;
-            const tb = nodes.get(b)?.timestamp ?? 0;
-            if (ta !== tb) return ta - tb;
-            return a.localeCompare(b);
-          });
-        for (const childId of userForks) {
-          processFromNode(childId, forkSerial++);
+        // 从用户消息直接分叉：与助手子叉一致，最早的用户子延续本列，其余按时间渐新收更右的轨（新支在外侧）
+        const uids = (node.children ?? []).filter(
+          (cid) => cid !== assistantId && nodes.get(cid)?.role === 'user'
+        );
+        if (uids.length) {
+          const { continuation, others } = orderForkChildren(uids, nodes);
+          if (continuation) processFromNode(continuation, branchIndex);
+          for (const childId of others) {
+            processFromNode(childId, forkSerial++);
+          }
         }
         return;
       }
@@ -195,7 +232,7 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
         });
         if (node.children?.length) {
           const { continuation, others } = orderForkChildren(node.children, nodes);
-          processFromNode(continuation, branchIndex);
+          if (continuation) processFromNode(continuation, branchIndex);
           for (const childId of others) {
             processFromNode(childId, forkSerial++);
           }
@@ -242,7 +279,7 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
   }, [visualTurns, turnByNodeId, currentBranchPath]);
 
   return (
-    <TooltipProvider>
+    <>
       <div className="relative w-72 h-full bg-card border-r flex flex-col min-h-0">
         <div className="p-4 border-b bg-muted/30 shrink-0">
           <div className="flex items-center gap-2">
@@ -252,7 +289,14 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
           <p className="text-xs text-muted-foreground mt-1">{visualTurns.length} 轮对话</p>
         </div>
 
-        <div className="flex-1 relative overflow-auto min-h-0">
+        <div
+          className="flex-1 relative overflow-auto min-h-0"
+          onScroll={() => {
+            clearTipLeaveTimer();
+            setHoverTip(null);
+            setHoveredTurn(null);
+          }}
+        >
           <svg
             className="w-full min-h-full"
             style={{
@@ -299,134 +343,160 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
               const isCurrent =
                 (t.userId && lastId === t.userId) || (t.assistantId && lastId === t.assistantId);
               const isHovered = hoveredTurn === t.id;
+              const previewText = getTurnPreviewText(t.userNode, t.assistantNode);
               const w = 30;
               const h = 18;
               const rx = 9;
+              /** 透明命中区略大于药丸+当前外圈；梗概为 Portal 到 body，避免在 svg 里用 Radix 不弹层 */
+              const hitW = w + 16;
+              const hitH = h + 14;
+              const hitRx = rx + 3;
+
+              const handlePillClick = (e: MouseEvent<SVGRectElement>) => {
+                e.stopPropagation();
+                const svg = (e.currentTarget as SVGElement).ownerSVGElement;
+                if (!svg) return;
+                const pt = svg.createSVGPoint();
+                pt.x = e.clientX;
+                pt.y = e.clientY;
+                const ctm = svg.getScreenCTM();
+                if (!ctm) return;
+                const p = pt.matrixTransform(ctm.inverse());
+                const goLeft = p.x < t.x;
+                if (goLeft && t.userId) onNodeClick(t.userId);
+                else if (t.assistantId) onNodeClick(t.assistantId);
+                else if (t.userId) onNodeClick(t.userId);
+              };
 
               return (
-                <Tooltip key={t.id}>
-                  <TooltipTrigger asChild>
-                    <g
-                      className="cursor-pointer transition-all"
-                      onMouseEnter={() => setHoveredTurn(t.id)}
-                      onMouseLeave={() => setHoveredTurn(null)}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const svg = (e.currentTarget as SVGGElement).closest('svg');
-                        if (!svg) return;
-                        const pt = svg.createSVGPoint();
-                        pt.x = e.clientX;
-                        pt.y = e.clientY;
-                        const ctm = svg.getScreenCTM();
-                        if (!ctm) return;
-                        const p = pt.matrixTransform(ctm.inverse());
-                        const goLeft = p.x < t.x;
-                        if (goLeft && t.userId) onNodeClick(t.userId);
-                        else if (t.assistantId) onNodeClick(t.assistantId);
-                        else if (t.userId) onNodeClick(t.userId);
+                <g key={t.id}>
+                  {isCurrent && (
+                    <ellipse
+                      cx={t.x}
+                      cy={t.y}
+                      rx={w / 2 + 6}
+                      ry={h / 2 + 6}
+                      fill="none"
+                      stroke={t.color}
+                      strokeWidth={2}
+                      opacity={0.45}
+                      className="animate-pulse"
+                      style={{ pointerEvents: 'none' }}
+                    />
+                  )}
+
+                  <g
+                    transform={
+                      isHovered
+                        ? `translate(${t.x},${t.y}) scale(1.06) translate(${-t.x},${-t.y})`
+                        : undefined
+                    }
+                  >
+                    <rect
+                      x={t.x - w / 2}
+                      y={t.y - h / 2}
+                      width={w}
+                      height={h}
+                      rx={rx}
+                      ry={rx}
+                      fill={`url(#grad-${t.id})`}
+                      stroke={inPath ? 'hsl(var(--background))' : 'transparent'}
+                      strokeWidth={inPath ? 2 : 0}
+                      opacity={inPath ? 1 : 0.65}
+                      style={{ pointerEvents: 'none' }}
+                    />
+
+                    <rect
+                      x={t.x - hitW / 2}
+                      y={t.y - hitH / 2}
+                      width={hitW}
+                      height={hitH}
+                      rx={hitRx}
+                      ry={hitRx}
+                      fill="transparent"
+                      className="cursor-pointer transition-all outline-none"
+                      onClick={handlePillClick}
+                      onPointerEnter={(e) => {
+                        clearTipLeaveTimer();
+                        setHoveredTurn(t.id);
+                        const r = (e.currentTarget as SVGRectElement).getBoundingClientRect();
+                        setHoverTip({ id: t.id, text: previewText, left: r.right + 6, top: r.top });
+                      }}
+                      onPointerLeave={() => {
+                        setHoveredTurn(null);
+                        clearTipLeaveTimer();
+                        tipLeaveTimerRef.current = setTimeout(() => {
+                          setHoverTip((s) => (s?.id === t.id ? null : s));
+                          tipLeaveTimerRef.current = null;
+                        }, 200);
                       }}
                     >
-                      {isCurrent && (
-                        <ellipse
-                          cx={t.x}
-                          cy={t.y}
-                          rx={w / 2 + 6}
-                          ry={h / 2 + 6}
-                          fill="none"
-                          stroke={t.color}
-                          strokeWidth={2}
-                          opacity={0.45}
-                          className="animate-pulse"
-                        />
-                      )}
+                      <title>{previewText}</title>
+                    </rect>
+                  </g>
 
-                      <g
-                        transform={
-                          isHovered
-                            ? `translate(${t.x},${t.y}) scale(1.06) translate(${-t.x},${-t.y})`
-                            : undefined
-                        }
-                      >
-                        <rect
-                          x={t.x - w / 2}
-                          y={t.y - h / 2}
-                          width={w}
-                          height={h}
-                          rx={rx}
-                          ry={rx}
-                          fill={`url(#grad-${t.id})`}
-                          stroke={inPath ? 'hsl(var(--background))' : 'transparent'}
-                          strokeWidth={inPath ? 2 : 0}
-                          opacity={inPath ? 1 : 0.65}
-                        />
-                      </g>
-
-                      {t.userNode && (
-                        <text
-                          x={t.x - 7}
-                          y={t.y + 1}
-                          textAnchor="middle"
-                          dominantBaseline="middle"
-                          className="text-[9px] fill-white font-bold pointer-events-none"
-                        >
-                          U
-                        </text>
-                      )}
-                      {t.userNode && t.assistantNode && (
-                        <text
-                          x={t.x + 7}
-                          y={t.y + 1}
-                          textAnchor="middle"
-                          dominantBaseline="middle"
-                          className="text-[9px] fill-white font-bold pointer-events-none"
-                        >
-                          A
-                        </text>
-                      )}
-                      {!t.userNode && t.assistantNode && (
-                        <text
-                          x={t.x}
-                          y={t.y + 1}
-                          textAnchor="middle"
-                          dominantBaseline="middle"
-                          className="text-[9px] fill-white font-bold pointer-events-none"
-                        >
-                          A
-                        </text>
-                      )}
-                    </g>
-                  </TooltipTrigger>
-                  <TooltipContent side="right" className="max-w-xs">
-                    <div className="space-y-2">
-                      {t.userNode && (
-                        <div>
-                          <div className="text-xs font-semibold">👤 用户</div>
-                          <div className="text-xs line-clamp-3 text-muted-foreground">
-                            {t.userNode.content || '(空)'}
-                          </div>
-                        </div>
-                      )}
-                      {t.assistantNode && (
-                        <div>
-                          <div className="text-xs font-semibold">🤖 助手</div>
-                          <div className="text-xs line-clamp-3 text-muted-foreground">
-                            {t.assistantNode.content || '(生成中...)'}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </TooltipContent>
-                </Tooltip>
+                  {t.userNode && (
+                    <text
+                      x={t.x - 7}
+                      y={t.y + 1}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      className="text-[9px] fill-white font-bold pointer-events-none"
+                    >
+                      U
+                    </text>
+                  )}
+                  {t.userNode && t.assistantNode && (
+                    <text
+                      x={t.x + 7}
+                      y={t.y + 1}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      className="text-[9px] fill-white font-bold pointer-events-none"
+                    >
+                      A
+                    </text>
+                  )}
+                  {!t.userNode && t.assistantNode && (
+                    <text
+                      x={t.x}
+                      y={t.y + 1}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      className="text-[9px] fill-white font-bold pointer-events-none"
+                    >
+                      A
+                    </text>
+                  )}
+                </g>
               );
             })}
           </svg>
         </div>
       </div>
-    </TooltipProvider>
+      {typeof document !== 'undefined' &&
+        hoverTip &&
+        createPortal(
+          <div
+            className="pointer-events-auto z-[200] max-w-[min(20rem,85vw)] rounded-md border border-border bg-popover px-3 py-2 text-xs leading-snug text-popover-foreground shadow-md"
+            role="tooltip"
+            style={{ position: 'fixed', left: hoverTip.left, top: hoverTip.top }}
+            onPointerEnter={clearTipLeaveTimer}
+            onPointerLeave={() => {
+              setHoverTip(null);
+            }}
+          >
+            <p className="m-0 line-clamp-2 text-left font-normal">{hoverTip.text}</p>
+          </div>,
+          document.body
+        )}
+    </>
   );
 }
 
-/** 缩略图父子连线：仿 git 图 — 端部多「外甩」一点，横移大时从两端弯向对侧，整体更 S、不像硬折线 */
+/**
+ * 类 Git 图：同列 = 主竖线略弯；换列 = 从父点横甩、子点竖直切入（大半径 S，避免两端对称的「细腰」感）。
+ */
 function curvedBranchEdgePath(from: VisualTurn, to: VisualTurn): string {
   const sx = from.x;
   const sy = from.y + EDGE_Y_INSET;
@@ -434,11 +504,19 @@ function curvedBranchEdgePath(from: VisualTurn, to: VisualTurn): string {
   const ey = to.y - EDGE_Y_INSET;
   const dx = ex - sx;
   const dy = ey - sy;
-  const h = Math.max(18, Math.min(Math.abs(dy) * 0.52, 60));
-  const pullX = Math.min(44, Math.max(10, Math.abs(dx) * 0.5));
   const sign = Math.sign(dx) || 0;
-  // 控制点：起点向子列方向、沿竖直多走一截；终点对称，两端都比纯竖控更「弯」
-  return `M ${sx} ${sy} C ${sx + sign * pullX} ${sy + h} ${ex - sign * pullX} ${ey - h} ${ex} ${ey}`;
+  const absX = Math.abs(dx);
+
+  if (absX < 1) {
+    const h = Math.max(20, Math.min(Math.abs(dy) * 0.52, 64));
+    return `M ${sx} ${sy} C ${sx} ${sy + h} ${ex} ${ey - h} ${ex} ${ey}`;
+  }
+
+  const pull = Math.min(40, Math.max(10, absX * 0.5 + 6));
+  const c1x = sx + sign * pull;
+  const c1y = sy + Math.min(22, Math.max(4, Math.abs(dy) * 0.12));
+  const vIn = Math.max(20, Math.min(52, Math.abs(dy) * 0.38));
+  return `M ${sx} ${sy} C ${c1x} ${c1y} ${ex} ${ey - vIn} ${ex} ${ey}`;
 }
 
 /** 粗略提亮 hsl() 字符串，用于同一分支内区分 U / A 半区 */

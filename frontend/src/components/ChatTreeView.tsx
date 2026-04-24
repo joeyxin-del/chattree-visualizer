@@ -9,8 +9,12 @@ import { Send, Sparkles } from 'lucide-react';
 
 export function ChatTreeView() {
   const { nodes, rootNodes, sessionKey, setSessionKey } = useChatTreeStore();
+
   /** 为 true 时：新消息/流式完成后自动切到最新用户或助手节点（类似 ChatGPT）；点击左侧分支后为 false */
   const followLatestRef = useRef(true);
+  const [inputMessage, setInputMessage] = useState('');
+  const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
+  const pendingBranchRef = useRef<{ parentId: string; since: number; firstMessage: string } | null>(null);
 
   const wsHandlers = useMemo(
     () => ({
@@ -28,13 +32,10 @@ export function ChatTreeView() {
         }
       },
     }),
-    []
+    [setCurrentNodeId]
   );
 
   const { sendMessage } = useWebSocket(sessionKey, wsHandlers);
-  const [inputMessage, setInputMessage] = useState('');
-  const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
-  const pendingBranchRef = useRef<{ parentId: string; since: number; firstMessage: string } | null>(null);
 
   // 初始化会话（开发环境走 Vite 代理 /api -> :8000，需先启动后端）
   useEffect(() => {

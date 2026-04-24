@@ -49,21 +49,26 @@ function joinUrl(base: string, path: string): string {
 export function useWebSocket(sessionKey: string | null, handlers?: WebSocketHandlers) {
   const wsRef = useRef<WebSocket | null>(null);
   const handlersRef = useRef(handlers);
+  const closingVoluntarilyRef = useRef(false);
   handlersRef.current = handlers;
-  const { addNode, updateNode } = useChatTreeStore();
 
   useEffect(() => {
     if (!sessionKey) return;
 
-    const ws = new WebSocket(joinUrl(getWsBase(), `/ws/${sessionKey}`));
+    closingVoluntarilyRef.current = false;
+    const url = joinUrl(getWsBase(), `/ws/${sessionKey}`);
+    const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log('WebSocket connected');
+      if (import.meta.env.DEV) {
+        console.debug('[ws] open', url);
+      }
     };
 
     ws.onmessage = (event) => {
       const message: WSMessage = JSON.parse(event.data);
+      const { addNode, updateNode } = useChatTreeStore.getState();
 
       switch (message.type) {
         case 'node_created':
@@ -101,23 +106,28 @@ export function useWebSocket(sessionKey: string | null, handlers?: WebSocketHand
       }
     };
 
+    /** 浏览器在 onerror 里几乎不给出原因，以 onclose 的 code 为准。 */
     ws.onerror = () => {
-      console.error(
-        'WebSocket error (is backend running on :8000?):',
-        ws.url,
-        'readyState=',
-        ws.readyState
-      );
+      if (closingVoluntarilyRef.current) return;
     };
 
     ws.onclose = (ev) => {
-      console.log('WebSocket closed', ws.url, 'code=', ev.code, ev.reason || '');
+      if (closingVoluntarilyRef.current) return;
+      if (import.meta.env.DEV) {
+        console.debug('[ws] close', 'code=', ev.code, ev.reason || '', url);
+      }
+      if (ev.code === 1000) return;
+      console.warn(
+        '[ws] 与后端长连接已关闭（code=' + ev.code + '）。未启动 / 已退出后端时常见。请开 :8000：项目根目录运行 start-all.cmd 或 start-backend.cmd。',
+        url
+      );
     };
 
     return () => {
+      closingVoluntarilyRef.current = true;
       ws.close();
     };
-  }, [sessionKey, addNode, updateNode]);
+  }, [sessionKey]);
 
   const sendMessage = useCallback((message: ChatMessageRequest) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
