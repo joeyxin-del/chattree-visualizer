@@ -9,7 +9,29 @@ import { Send, Sparkles } from 'lucide-react';
 
 export function ChatTreeView() {
   const { nodes, rootNodes, sessionKey, setSessionKey } = useChatTreeStore();
-  const { sendMessage } = useWebSocket(sessionKey);
+  /** 为 true 时：新消息/流式完成后自动切到最新用户或助手节点（类似 ChatGPT）；点击左侧分支后为 false */
+  const followLatestRef = useRef(true);
+
+  const wsHandlers = useMemo(
+    () => ({
+      onNodeCreated: (node: ChatNode) => {
+        if (!followLatestRef.current) return;
+        if (node.role === 'user' || node.role === 'assistant') {
+          setCurrentNodeId(node.id);
+        }
+      },
+      onNodeCompleted: (nodeId: string) => {
+        if (!followLatestRef.current) return;
+        const n = useChatTreeStore.getState().nodes.get(nodeId);
+        if (n?.role === 'assistant') {
+          setCurrentNodeId(nodeId);
+        }
+      },
+    }),
+    []
+  );
+
+  const { sendMessage } = useWebSocket(sessionKey, wsHandlers);
   const [inputMessage, setInputMessage] = useState('');
   const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
   const pendingBranchRef = useRef<{ parentId: string; since: number; firstMessage: string } | null>(null);
@@ -53,6 +75,7 @@ export function ChatTreeView() {
   const handleSendMessage = useCallback(() => {
     if (!inputMessage.trim()) return;
 
+    followLatestRef.current = true;
     sendMessage({
       type: 'chat',
       parent_node_id: currentNodeId,
@@ -64,12 +87,14 @@ export function ChatTreeView() {
 
   // 切换到某个节点
   const handleNodeClick = useCallback((nodeId: string) => {
+    followLatestRef.current = false;
     setCurrentNodeId(nodeId);
   }, []);
 
   // 从某条消息分叉：发送首条用户消息并带上分支标签（左侧缩略图展示）
   const handleSubmitBranchFromMessage = useCallback(
     (parentNodeId: string, message: string, branchLabel?: string) => {
+      followLatestRef.current = true;
       pendingBranchRef.current = {
         parentId: parentNodeId,
         since: Date.now() / 1000 - 0.05,

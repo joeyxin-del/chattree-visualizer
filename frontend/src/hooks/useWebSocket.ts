@@ -1,6 +1,13 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useChatTreeStore } from '../store/chatTreeStore';
-import type { WSMessage, ChatMessageRequest } from '../types';
+import type { ChatNode, WSMessage, ChatMessageRequest } from '../types';
+
+export interface WebSocketHandlers {
+  /** 新节点写入 store 之后调用（用于跟流到最新用户/助手） */
+  onNodeCreated?: (node: ChatNode) => void;
+  /** 节点标记为 completed 且 store 已更新之后调用 */
+  onNodeCompleted?: (nodeId: string) => void;
+}
 
 /** Dev: direct to backend (Vite WS proxy is unreliable on some setups). Prod: set VITE_API_BASE or same-origin /api. */
 const DEV_HTTP_BACKEND = (
@@ -39,8 +46,10 @@ function joinUrl(base: string, path: string): string {
   return `${base.replace(/\/$/, '')}${p}`;
 }
 
-export function useWebSocket(sessionKey: string | null) {
+export function useWebSocket(sessionKey: string | null, handlers?: WebSocketHandlers) {
   const wsRef = useRef<WebSocket | null>(null);
+  const handlersRef = useRef(handlers);
+  handlersRef.current = handlers;
   const { addNode, updateNode } = useChatTreeStore();
 
   useEffect(() => {
@@ -60,6 +69,7 @@ export function useWebSocket(sessionKey: string | null) {
         case 'node_created':
           if (message.node) {
             addNode(message.node);
+            handlersRef.current?.onNodeCreated?.(message.node);
           }
           break;
 
@@ -75,6 +85,7 @@ export function useWebSocket(sessionKey: string | null) {
               content: message.content,
               status: 'completed'
             });
+            handlersRef.current?.onNodeCompleted?.(message.node_id);
           }
           break;
 
@@ -84,6 +95,7 @@ export function useWebSocket(sessionKey: string | null) {
               content: message.error || 'Error occurred',
               status: 'aborted'
             });
+            handlersRef.current?.onNodeCompleted?.(message.node_id);
           }
           break;
       }
