@@ -26,11 +26,79 @@ interface VisualTurn {
 
 const MUTED = 'hsl(var(--muted))';
 
+/** 分支横轴：与 git 图类似，每个 branchIndex 一「轨」，不同分支不同列，避免多根线叠在同一条竖线上 */
+const LANE_X = (branchIndex: number) => 36 + branchIndex * 48;
+
+/** Git Graph 式：只按创建时间。最早子节点延续当前列，其余子节点按时间渐新依次占更右的列（最新分叉在最外侧）。不用当前选中路径参与排轨，避免切换查看分支时整图列序乱跳。 */
+function orderForkChildren(childIds: string[], nodes: Map<string, ChatNode>): { continuation: string; others: string[] } {
+  const sorted = [...childIds].sort((a, b) => {
+    const ta = nodes.get(a)?.timestamp ?? 0;
+    const tb = nodes.get(b)?.timestamp ?? 0;
+    if (ta !== tb) return ta - tb;
+    return a.localeCompare(b);
+  });
+  if (sorted.length === 0) return { continuation: '', others: [] };
+  return { continuation: sorted[0], others: sorted.slice(1) };
+}
+
 function findAssistantChild(nodes: Map<string, ChatNode>, userId: string): string | null {
   const u = nodes.get(userId);
   if (!u?.children?.length) return null;
   const aid = u.children.find((cid) => nodes.get(cid)?.role === 'assistant');
   return aid ?? null;
+}
+
+function turnSortTimestamp(t: VisualTurn): number {
+  return t.userNode?.timestamp ?? t.assistantNode?.timestamp ?? 0;
+}
+
+/** 按「离根几轮」算深度，再按深度+时间排 y，避免 DFS 先走完主链导致侧枝被挤到最底下、离父节点很远 */
+function assignYByDepthAndTime(turns: VisualTurn[]): VisualTurn[] {
+  if (turns.length === 0) return turns;
+  const byNode = new Map<string, VisualTurn>();
+  for (const t of turns) {
+    if (t.userId) byNode.set(t.userId, t);
+    if (t.assistantId) byNode.set(t.assistantId, t);
+  }
+  /** 对话链只跟「上一轮」走：有用户节点时只看 user.parent_id；勿用 assistant.parent_id 兜底（常指向同轮用户，会 map 回自己导致爆栈） */
+  const parentTurn = (t: VisualTurn): VisualTurn | null => {
+    const pid =
+      t.userNode != null ? t.userNode.parent_id : (t.assistantNode?.parent_id ?? null);
+    if (!pid) return null;
+    const p = byNode.get(pid) ?? null;
+    if (!p || p.id === t.id) return null;
+    return p;
+  };
+  const depthMemo = new Map<string, number>();
+  const visiting = new Set<string>();
+  const depthOf = (t: VisualTurn): number => {
+    if (depthMemo.has(t.id)) return depthMemo.get(t.id)!;
+    if (visiting.has(t.id)) {
+      depthMemo.set(t.id, 0);
+      return 0;
+    }
+    visiting.add(t.id);
+    const p = parentTurn(t);
+    const d = p !== null ? depthOf(p) + 1 : 0;
+    visiting.delete(t.id);
+    depthMemo.set(t.id, d);
+    return d;
+  };
+  for (const t of turns) depthOf(t);
+
+  const sorted = [...turns].sort((a, b) => {
+    const da = depthMemo.get(a.id)!;
+    const db = depthMemo.get(b.id)!;
+    if (da !== db) return da - db;
+    const ta = turnSortTimestamp(a);
+    const tb = turnSortTimestamp(b);
+    if (ta !== tb) return ta - tb;
+    return a.id.localeCompare(b.id);
+  });
+
+  const rowStep = 52;
+  const top = 36;
+  return sorted.map((t, i) => ({ ...t, y: top + i * rowStep }));
 }
 
 export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeClick }: BranchVisualizerProps) {
@@ -47,13 +115,19 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
       'hsl(280.4 89.1% 64.9%)',
     ];
 
-    let yOffset = 36;
-    /** 递增分叉序号，避免「用户下多叉 + 助手下多叉」时 branchIndex 算式撞车导致同色、同 x */
-    let forkSerial = rootNodes.length;
+    /** 递增分叉序号：新分配的列单调向右，与 Git Graph「新支在最外侧」一致 */
+    const sortedRoots = [...rootNodes].sort((a, b) => {
+      const ta = nodes.get(a)?.timestamp ?? 0;
+      const tb = nodes.get(b)?.timestamp ?? 0;
+      if (ta !== tb) return ta - tb;
+      return a.localeCompare(b);
+    });
+    let forkSerial = sortedRoots.length;
 
-    const processFromNode = (nodeId: string, branchIndex: number, xOffset: number) => {
+    const processFromNode = (nodeId: string, branchIndex: number) => {
       const node = nodes.get(nodeId);
       if (!node) return;
+      const x = LANE_X(branchIndex);
 
       if (node.role === 'user') {
         const assistantId = findAssistantChild(nodes, node.id);
@@ -67,34 +141,36 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
           assistantId,
           userNode: node,
           assistantNode,
-          x: xOffset,
-          y: yOffset,
+          x,
+          y: 0,
           color: base,
           assistantColor,
           branchIndex,
         });
-        yOffset += 52;
 
         if (assistantId) {
           const ast = nodes.get(assistantId);
           if (ast?.children?.length) {
-            ast.children.forEach((childId, index) => {
-              const newBranchIndex = index === 0 ? branchIndex : forkSerial++;
-              const newX = index === 0 ? xOffset : xOffset + index * 44;
-              processFromNode(childId, newBranchIndex, newX);
-            });
+            const { continuation, others } = orderForkChildren(ast.children, nodes);
+            processFromNode(continuation, branchIndex);
+            for (const childId of others) {
+              processFromNode(childId, forkSerial++);
+            }
           }
         }
 
         // 从用户消息直接分叉：子节点里是另一条「用户」链，不经过当前助手子树
-        const userForks = (node.children ?? []).filter(
-          (cid) => cid !== assistantId && nodes.get(cid)?.role === 'user'
-        );
-        userForks.forEach((childId, i) => {
-          const bi = forkSerial++;
-          const newX = xOffset + (i + 1) * 44;
-          processFromNode(childId, bi, newX);
-        });
+        const userForks = (node.children ?? [])
+          .filter((cid) => cid !== assistantId && nodes.get(cid)?.role === 'user')
+          .sort((a, b) => {
+            const ta = nodes.get(a)?.timestamp ?? 0;
+            const tb = nodes.get(b)?.timestamp ?? 0;
+            if (ta !== tb) return ta - tb;
+            return a.localeCompare(b);
+          });
+        for (const childId of userForks) {
+          processFromNode(childId, forkSerial++);
+        }
         return;
       }
 
@@ -107,29 +183,34 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
           assistantId: node.id,
           userNode: null,
           assistantNode: node,
-          x: xOffset,
-          y: yOffset,
+          x,
+          y: 0,
           color: base,
           assistantColor: lightenHsl(base, 8),
           branchIndex,
         });
-        yOffset += 52;
         if (node.children?.length) {
-          node.children.forEach((childId, index) => {
-            const newBranchIndex = index === 0 ? branchIndex : forkSerial++;
-            const newX = index === 0 ? xOffset : xOffset + index * 44;
-            processFromNode(childId, newBranchIndex, newX);
-          });
+          const { continuation, others } = orderForkChildren(node.children, nodes);
+          processFromNode(continuation, branchIndex);
+          for (const childId of others) {
+            processFromNode(childId, forkSerial++);
+          }
         }
       }
     };
 
-    rootNodes.forEach((rootId, index) => {
-      processFromNode(rootId, index, 56 + index * 48);
+    sortedRoots.forEach((rootId, index) => {
+      processFromNode(rootId, index);
     });
 
-    return result;
+    return assignYByDepthAndTime(result);
   }, [nodes, rootNodes]);
+
+  const svgMinWidth = useMemo(() => {
+    if (visualTurns.length === 0) return 288;
+    const maxX = Math.max(...visualTurns.map((t) => t.x));
+    return Math.max(288, maxX + 40);
+  }, [visualTurns]);
 
   const turnByNodeId = useMemo(() => {
     const m = new Map<string, VisualTurn>();
@@ -171,6 +252,7 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
           <svg
             className="w-full min-h-full"
             style={{
+              minWidth: svgMinWidth,
               minHeight: Math.max(
                 400,
                 visualTurns.reduce((m, t) => Math.max(m, t.y), 0) + 56
@@ -188,19 +270,21 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
               ))}
             </defs>
 
-            {edges.map(({ from, to, inPath }) => (
-              <line
-                key={`${from.id}-${to.id}`}
-                x1={from.x}
-                y1={from.y + 10}
-                x2={to.x}
-                y2={to.y - 10}
-                stroke={inPath ? from.color : 'hsl(var(--muted-foreground))'}
-                strokeWidth={inPath ? 3 : 2}
-                opacity={inPath ? 0.85 : 0.35}
-                className="transition-all"
-              />
-            ))}
+            {edges.map(({ from, to, inPath }) => {
+              const d = curvedBranchEdgePath(from, to);
+              return (
+                <path
+                  key={`${from.id}-${to.id}`}
+                  d={d}
+                  fill="none"
+                  stroke={inPath ? from.color : 'hsl(var(--muted-foreground))'}
+                  strokeWidth={inPath ? 3 : 2}
+                  strokeLinecap="round"
+                  opacity={inPath ? 0.85 : 0.35}
+                  className="transition-all"
+                />
+              );
+            })}
 
             {visualTurns.map((t) => {
               const pathSet = new Set(currentBranchPath);
@@ -336,6 +420,21 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
       </div>
     </TooltipProvider>
   );
+}
+
+/** 缩略图父子连线：仿 git 图 — 端部多「外甩」一点，横移大时从两端弯向对侧，整体更 S、不像硬折线 */
+function curvedBranchEdgePath(from: VisualTurn, to: VisualTurn): string {
+  const sx = from.x;
+  const sy = from.y + 10;
+  const ex = to.x;
+  const ey = to.y - 10;
+  const dx = ex - sx;
+  const dy = ey - sy;
+  const h = Math.max(22, Math.min(Math.abs(dy) * 0.52, 72));
+  const pullX = Math.min(44, Math.max(10, Math.abs(dx) * 0.5));
+  const sign = Math.sign(dx) || 0;
+  // 控制点：起点向子列方向、沿竖直多走一截；终点对称，两端都比纯竖控更「弯」
+  return `M ${sx} ${sy} C ${sx + sign * pullX} ${sy + h} ${ex - sign * pullX} ${ey - h} ${ex} ${ey}`;
 }
 
 /** 粗略提亮 hsl() 字符串，用于同一分支内区分 U / A 半区 */
