@@ -29,6 +29,12 @@ const MUTED = 'hsl(var(--muted))';
 /** 分支横轴：与 git 图类似，每个 branchIndex 一「轨」，不同分支不同列，避免多根线叠在同一条竖线上 */
 const LANE_X = (branchIndex: number) => 36 + branchIndex * 48;
 
+/** 纵排：略紧凑，仍保留胶囊与连线可读性 */
+const ROW_STEP = 42;
+const ROW_TOP = 30;
+const ROW_BOTTOM_PAD = 46;
+const EDGE_Y_INSET = 8;
+
 /** Git Graph 式：只按创建时间。最早子节点延续当前列，其余子节点按时间渐新依次占更右的列（最新分叉在最外侧）。不用当前选中路径参与排轨，避免切换查看分支时整图列序乱跳。 */
 function orderForkChildren(childIds: string[], nodes: Map<string, ChatNode>): { continuation: string; others: string[] } {
   const sorted = [...childIds].sort((a, b) => {
@@ -96,9 +102,7 @@ function assignYByDepthAndTime(turns: VisualTurn[]): VisualTurn[] {
     return a.id.localeCompare(b.id);
   });
 
-  const rowStep = 52;
-  const top = 36;
-  return sorted.map((t, i) => ({ ...t, y: top + i * rowStep }));
+  return sorted.map((t, i) => ({ ...t, y: ROW_TOP + i * ROW_STEP }));
 }
 
 export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeClick }: BranchVisualizerProps) {
@@ -255,7 +259,7 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
               minWidth: svgMinWidth,
               minHeight: Math.max(
                 400,
-                visualTurns.reduce((m, t) => Math.max(m, t.y), 0) + 56
+                visualTurns.reduce((m, t) => Math.max(m, t.y), 0) + ROW_BOTTOM_PAD
               ),
             }}
           >
@@ -425,12 +429,12 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
 /** 缩略图父子连线：仿 git 图 — 端部多「外甩」一点，横移大时从两端弯向对侧，整体更 S、不像硬折线 */
 function curvedBranchEdgePath(from: VisualTurn, to: VisualTurn): string {
   const sx = from.x;
-  const sy = from.y + 10;
+  const sy = from.y + EDGE_Y_INSET;
   const ex = to.x;
-  const ey = to.y - 10;
+  const ey = to.y - EDGE_Y_INSET;
   const dx = ex - sx;
   const dy = ey - sy;
-  const h = Math.max(22, Math.min(Math.abs(dy) * 0.52, 72));
+  const h = Math.max(18, Math.min(Math.abs(dy) * 0.52, 60));
   const pullX = Math.min(44, Math.max(10, Math.abs(dx) * 0.5));
   const sign = Math.sign(dx) || 0;
   // 控制点：起点向子列方向、沿竖直多走一截；终点对称，两端都比纯竖控更「弯」
