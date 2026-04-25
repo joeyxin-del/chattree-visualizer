@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import { Handle, Position } from 'reactflow';
 import type { ChatNode } from '../types';
+import { stripInferenceBlocksForDisplay } from '../utils/messageDisplay';
 
 interface ChatNodeComponentProps {
   data: ChatNode;
@@ -58,7 +59,14 @@ export const ChatNodeComponent = memo(({ data, selected }: ChatNodeComponentProp
           </div>
         )}
         <div className="text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap break-words">
-          {data.content || (data.status === 'streaming' ? '思考中...' : '等待中...')}
+          {(() => {
+            const raw = data.content || '';
+            const text =
+              data.role === 'assistant' ? stripInferenceBlocksForDisplay(raw) : raw;
+            if (text.trim()) return text;
+            if (data.status === 'streaming') return '思考中...';
+            return '等待中...';
+          })()}
         </div>
         {data.status === 'streaming' && (
           <div className="mt-2 flex items-center gap-2">

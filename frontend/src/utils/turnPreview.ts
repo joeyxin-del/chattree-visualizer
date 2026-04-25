@@ -1,4 +1,5 @@
 import type { ChatNode } from '../types';
+import { stripInferenceBlocksForDisplay } from './messageDisplay';
 
 const DEFAULT_MAX_CHARS = 100;
 
@@ -13,7 +14,8 @@ export function getTurnPreviewText(
 ): string {
   const label = userNode?.branch_label?.trim();
   const user = userNode?.content?.trim() ?? '';
-  const assistant = assistantNode?.content?.trim() ?? '';
+  const assistantRaw = assistantNode?.content ?? '';
+  const assistant = stripInferenceBlocksForDisplay(assistantRaw).trim();
   const body = user ? truncateText(user, maxChars) : assistant ? truncateText(assistant, maxChars) : '';
   if (!body) {
     return '该节点尚无文本，发送消息后将显示简介';

@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import type { ChatNode } from '../types';
+import { stripInferenceBlocksForDisplay } from '../utils/messageDisplay';
 import { ScrollArea } from './ui/scroll-area';
 import { Button } from './ui/button';
 import { User, Bot, GitBranch, Send } from 'lucide-react';
@@ -73,6 +74,10 @@ export function ChatView({ messages, onSubmitBranchFromMessage }: ChatViewProps)
           ) : (
             messages.map((msg) => {
               const isUser = msg.role === 'user';
+              const rawContent = msg.content || '';
+              const displayContent = isUser
+                ? rawContent
+                : stripInferenceBlocksForDisplay(rawContent);
               const showBranchBtn =
                 hoveredId === msg.id && branchInputId !== msg.id;
               const showBranchInput = branchInputId === msg.id;
@@ -108,11 +113,20 @@ export function ChatView({ messages, onSubmitBranchFromMessage }: ChatViewProps)
                     }`}
                   >
                     <div className="whitespace-pre-wrap select-text text-sm leading-relaxed">
-                      {msg.content || (
+                      {isUser ? (
+                        displayContent || (
+                          <span className="italic opacity-50 flex items-center gap-2">
+                            <span className="inline-block w-2 h-2 bg-current rounded-full animate-pulse"></span>
+                            生成中...
+                          </span>
+                        )
+                      ) : msg.status === 'streaming' && !displayContent.trim() ? (
                         <span className="italic opacity-50 flex items-center gap-2">
                           <span className="inline-block w-2 h-2 bg-current rounded-full animate-pulse"></span>
                           生成中...
                         </span>
+                      ) : (
+                        displayContent || null
                       )}
                     </div>
                   </div>

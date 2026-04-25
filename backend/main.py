@@ -31,8 +31,17 @@ active_connections: Dict[str, WebSocket] = {}
 
 MAX_BRANCH_SUMMARY_NODES = int(os.getenv("MAX_BRANCH_SUMMARY_NODES", "200"))
 DEFAULT_BRANCH_SUMMARY_SYSTEM = (
-    "用一段话、简洁地概括以下对话的要点和结论。若内容为空或几乎无信息，只回复：无内容可总结。不要分条、不要标题，仅一段正文。"
+    "你是对话分支的摘要器。根据下方 user/assistant 消息，只输出一段连续中文（约 3～8 句），概括主题与结论。"
+    "严格要求：禁止编号与分条（不要用 1.2.3. 或「一、二、」）、禁止小标题、禁止 Markdown（**、#、列表），"
+    "禁止复述原文的列举结构；即使原文是分条回答，摘要也必须合并为一段散文。"
+    "不要输出思考过程、XML/标签或旁白。若几乎无信息，只输出：无内容可总结。"
 )
+
+
+def _branch_summary_temperature() -> float:
+    """摘要任务略降温度，减少「像原文一样分条」的倾向；可用 BRANCH_SUMMARY_TEMPERATURE 覆盖。"""
+    raw = (os.getenv("BRANCH_SUMMARY_TEMPERATURE", "0.35") or "").strip()
+    return float(raw) if raw else 0.35
 
 @dataclass
 class LlmEnv:
@@ -173,6 +182,7 @@ def build_non_stream_branch_summary_params(
 ) -> Tuple[str, dict]:
     """分支摘要非流式请求。role_messages 仅含 user/assistant。"""
     max_out = int(os.getenv("BRANCH_SUMMARY_MAX_TOKENS", "1024"))
+    temp = _branch_summary_temperature()
     if env.llm_provider == "anthropic":
         request_body: Dict[str, Any] = {
             "model": env.model_name,
@@ -180,6 +190,7 @@ def build_non_stream_branch_summary_params(
             "stream": False,
             "system": system_text,
             "messages": role_messages,
+            "temperature": temp,
         }
         return f"{env.base_url}/v1/messages", request_body
     if env.llm_provider == "openai_compat":
@@ -195,6 +206,7 @@ def build_non_stream_branch_summary_params(
                 ],
                 "max_tokens": min(max_out, max_tok),
                 "stream": False,
+                "temperature": temp,
             },
         )
     if env.llm_provider == "minimax":
@@ -210,6 +222,7 @@ def build_non_stream_branch_summary_params(
                 ],
                 "stream": False,
                 "max_completion_tokens": min(max_out, max_ct),
+                "temperature": temp,
             },
         )
     if env.llm_provider == "openrouter":
@@ -223,6 +236,7 @@ def build_non_stream_branch_summary_params(
                 ],
                 "max_tokens": min(max_out, 4096),
                 "stream": False,
+                "temperature": temp,
             },
         )
     raise ValueError(f"Unknown llm_provider: {env.llm_provider}")
