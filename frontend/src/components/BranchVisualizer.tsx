@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { ChatNode } from '../types';
 import { getTurnPreviewText } from '../utils/turnPreview';
 import { GitBranch } from 'lucide-react';
+import { useChatTreeStore } from '../store/chatTreeStore';
+import { fetchBranchSummary } from '../api/branchSummary';
 
 interface BranchVisualizerProps {
   nodes: Map<string, ChatNode>;
@@ -32,7 +34,9 @@ const LANE_X = (branchIndex: number) => 36 + branchIndex * 48;
 
 /** 纵排：略紧凑，仍保留胶囊与连线可读性 */
 const ROW_STEP = 42;
-const ROW_TOP = 30;
+/** 首行上方预留高度，给 Summary 的竖线 + S 圈 */
+const BRANCH_S_TOP_RESERVE = 28;
+const ROW_TOP = 30 + BRANCH_S_TOP_RESERVE;
 const ROW_BOTTOM_PAD = 46;
 const EDGE_Y_INSET = 8;
 
@@ -125,6 +129,26 @@ function assignYByDepthAndTime(turns: VisualTurn[]): VisualTurn[] {
   return sorted.map((t, i) => ({ ...t, y: ROW_TOP + i * ROW_STEP }));
 }
 
+function buildNodeIdsForBranch(turns: VisualTurn[]): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const t of turns) {
+    if (t.userId && t.userNode) {
+      if (!seen.has(t.userId)) {
+        seen.add(t.userId);
+        ids.push(t.userId);
+      }
+    }
+    if (t.assistantId && t.assistantNode) {
+      if (!seen.has(t.assistantId)) {
+        seen.add(t.assistantId);
+        ids.push(t.assistantId);
+      }
+    }
+  }
+  return ids;
+}
+
 interface BranchHoverTip {
   id: string;
   text: string;
@@ -133,9 +157,17 @@ interface BranchHoverTip {
 }
 
 export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeClick }: BranchVisualizerProps) {
+  const sessionKey = useChatTreeStore((s) => s.sessionKey);
   const [hoveredTurn, setHoveredTurn] = useState<string | null>(null);
   const [hoverTip, setHoverTip] = useState<BranchHoverTip | null>(null);
   const tipLeaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const summaryAbortRef = useRef<AbortController | null>(null);
+  const [summaryPanel, setSummaryPanel] = useState<
+    | { state: 'idle' }
+    | { state: 'loading' }
+    | { state: 'ok'; text: string; branchIndex: number }
+    | { state: 'err'; message: string }
+  >({ state: 'idle' });
 
   const clearTipLeaveTimer = () => {
     if (tipLeaveTimerRef.current !== null) {
@@ -278,6 +310,63 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
     return list;
   }, [visualTurns, turnByNodeId, currentBranchPath]);
 
+  const branchSummaryMarkers = useMemo(() => {
+    const m = new Map<number, VisualTurn[]>();
+    for (const t of visualTurns) {
+      const arr = m.get(t.branchIndex) ?? [];
+      arr.push(t);
+      m.set(t.branchIndex, arr);
+    }
+    const out: { branchIndex: number; first: VisualTurn; nodeIds: string[] }[] = [];
+    m.forEach((turns, branchIndex) => {
+      if (turns.length === 0) return;
+      const sorted = [...turns].sort((a, b) => a.y - b.y);
+      const first = sorted[0];
+      out.push({
+        branchIndex,
+        first,
+        nodeIds: buildNodeIdsForBranch(sorted),
+      });
+    });
+    out.sort((a, b) => a.branchIndex - b.branchIndex);
+    return out;
+  }, [visualTurns]);
+
+  const onBranchSummaryClick = useCallback(
+    (e: MouseEvent<SVGGElement>, branchIndex: number, nodeIds: string[]) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (!sessionKey) {
+        setSummaryPanel({ state: 'err', message: '尚未建立会话' });
+        return;
+      }
+      if (nodeIds.length === 0) {
+        setSummaryPanel({ state: 'err', message: '此分支无可用节点' });
+        return;
+      }
+      summaryAbortRef.current?.abort();
+      const ac = new AbortController();
+      summaryAbortRef.current = ac;
+      setSummaryPanel({ state: 'loading' });
+      void (async () => {
+        try {
+          const text = await fetchBranchSummary(sessionKey, nodeIds, ac.signal);
+          setSummaryPanel({ state: 'ok', text, branchIndex });
+        } catch (err: unknown) {
+          if (
+            (err instanceof DOMException && err.name === 'AbortError') ||
+            (err instanceof Error && err.name === 'AbortError')
+          ) {
+            return;
+          }
+          const msg = err instanceof Error ? err.message : '摘要失败';
+          setSummaryPanel({ state: 'err', message: msg });
+        }
+      })();
+    },
+    [sessionKey]
+  );
+
   return (
     <>
       <div className="relative w-72 h-full bg-card border-r flex flex-col min-h-0">
@@ -287,6 +376,18 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
             <h2 className="text-sm font-semibold text-foreground">分支视图</h2>
           </div>
           <p className="text-xs text-muted-foreground mt-1">{visualTurns.length} 轮对话</p>
+          {summaryPanel.state === 'loading' && (
+            <p className="text-xs text-muted-foreground mt-2">正在生成分支摘要…</p>
+          )}
+          {summaryPanel.state === 'ok' && (
+            <div className="mt-2 max-h-36 overflow-y-auto rounded-md border border-border bg-muted/30 px-2.5 py-2 text-xs leading-relaxed text-foreground">
+              <p className="m-0 mb-1 font-medium text-muted-foreground">分支摘要</p>
+              <p className="m-0 whitespace-pre-wrap">{summaryPanel.text}</p>
+            </div>
+          )}
+          {summaryPanel.state === 'err' && (
+            <p className="text-xs text-destructive mt-2 break-words">{summaryPanel.message}</p>
+          )}
         </div>
 
         <div
@@ -468,6 +569,51 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
                       A
                     </text>
                   )}
+                </g>
+              );
+            })}
+
+            {branchSummaryMarkers.map(({ branchIndex, first, nodeIds }) => {
+              const pillTopY = first.y - 9;
+              const r = 7;
+              const cy = first.y - 20;
+              const lineFromY = cy + r;
+              return (
+                <g key={`sum-${branchIndex}`} style={{ pointerEvents: 'all' }}>
+                  <line
+                    x1={first.x}
+                    y1={lineFromY}
+                    x2={first.x}
+                    y2={pillTopY}
+                    stroke="hsl(var(--muted-foreground))"
+                    strokeWidth={1.5}
+                    strokeLinecap="round"
+                    style={{ pointerEvents: 'none' }}
+                  />
+                  <g
+                    onClick={(e) => onBranchSummaryClick(e, branchIndex, nodeIds)}
+                    className="cursor-pointer"
+                    style={{ pointerEvents: 'all' }}
+                  >
+                    <circle
+                      cx={first.x}
+                      cy={cy}
+                      r={r}
+                      fill="hsl(var(--background))"
+                      stroke="hsl(var(--muted-foreground))"
+                      strokeWidth={1.5}
+                    />
+                    <text
+                      x={first.x}
+                      y={cy + 0.5}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      className="text-[8px] font-bold fill-[hsl(var(--muted-foreground))]"
+                      style={{ pointerEvents: 'none' }}
+                    >
+                      S
+                    </text>
+                  </g>
                 </g>
               );
             })}

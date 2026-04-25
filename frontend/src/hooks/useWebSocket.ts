@@ -14,7 +14,7 @@ const DEV_HTTP_BACKEND = (
   import.meta.env.VITE_DEV_BACKEND || 'http://127.0.0.1:8000'
 ).replace(/\/$/, '');
 
-function getApiBase(): string {
+export function getApiBase(): string {
   const base = import.meta.env.VITE_API_BASE;
   if (base !== undefined && String(base).trim() !== '') {
     return String(base).replace(/\/$/, '');
@@ -40,7 +40,7 @@ function getWsBase(): string {
   return 'ws://127.0.0.1:8000';
 }
 
-function joinUrl(base: string, path: string): string {
+export function joinUrl(base: string, path: string): string {
   const p = path.startsWith('/') ? path : `/${path}`;
   if (!base) return p;
   return `${base.replace(/\/$/, '')}${p}`;

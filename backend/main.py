@@ -1,13 +1,12 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
+from dataclasses import dataclass
 from datetime import datetime
-import asyncio
 import json
 import os
 from dotenv import load_dotenv
-import anthropic
 import httpx
 
 load_dotenv()
@@ -29,6 +28,246 @@ app.add_middleware(
 # 全局状态
 sessions: Dict[str, "ChatSession"] = {}
 active_connections: Dict[str, WebSocket] = {}
+
+MAX_BRANCH_SUMMARY_NODES = int(os.getenv("MAX_BRANCH_SUMMARY_NODES", "200"))
+DEFAULT_BRANCH_SUMMARY_SYSTEM = (
+    "用一段话、简洁地概括以下对话的要点和结论。若内容为空或几乎无信息，只回复：无内容可总结。不要分条、不要标题，仅一段正文。"
+)
+
+@dataclass
+class LlmEnv:
+    """LLM 环境配置（与 handle_chat_message 中解析逻辑一致）。"""
+    llm_provider: str
+    base_url: str
+    model_name: str
+    api_key: str
+    proxy: Optional[str] = None
+
+
+def _resolve_http_proxy() -> Optional[str]:
+    http_proxy = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
+    https_proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
+    if http_proxy and http_proxy.strip():
+        return http_proxy.strip()
+    if https_proxy and https_proxy.strip():
+        return https_proxy.strip()
+    return None
+
+
+def get_llm_env() -> LlmEnv:
+    """从环境变量解析当前 LLM 提供商与凭据。缺失时 raise ValueError（与历史行为一致）。"""
+    openai_base = (os.getenv("OPENAI_BASE_URL") or "").strip()
+    if openai_base:
+        llm_provider = "openai_compat"
+        base_url = openai_base.rstrip("/")
+        default_model = "MiniMax-M2.5"
+        model_name = os.getenv("MODEL_NAME") or default_model
+        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY not configured (OPENAI_BASE_URL is set)")
+    else:
+        base_url = os.getenv("API_BASE_URL", "https://api.anthropic.com").rstrip("/")
+        llm_provider = (os.getenv("LLM_PROVIDER") or "").strip().lower()
+        if not llm_provider:
+            if "minimax" in base_url.lower():
+                llm_provider = "minimax"
+            elif "openrouter" in base_url.lower():
+                llm_provider = "openrouter"
+            else:
+                llm_provider = "anthropic"
+        if llm_provider == "minimax":
+            default_model = "M2-her"
+        elif llm_provider == "openrouter":
+            default_model = "claude-sonnet-4-5"
+        else:
+            default_model = "claude-sonnet-4.5-20250514"
+        model_name = os.getenv("MODEL_NAME") or default_model
+        if llm_provider == "minimax":
+            api_key = os.getenv("MINIMAX_API_KEY") or os.getenv("API_KEY")
+            if not api_key:
+                raise ValueError("MINIMAX_API_KEY not configured")
+        elif llm_provider == "openrouter":
+            api_key = (
+                os.getenv("OPENROUTER_API_KEY")
+                or os.getenv("ANTHROPIC_API_KEY")
+                or os.getenv("API_KEY")
+            )
+            if not api_key:
+                raise ValueError("OPENROUTER_API_KEY or ANTHROPIC_API_KEY not configured")
+        else:
+            api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("API_KEY")
+            if not api_key:
+                raise ValueError("ANTHROPIC_API_KEY not configured")
+    return LlmEnv(
+        llm_provider=llm_provider,
+        base_url=base_url,
+        model_name=model_name,
+        api_key=api_key,
+        proxy=_resolve_http_proxy(),
+    )
+
+
+def build_llm_headers(env: LlmEnv) -> Dict[str, str]:
+    headers: Dict[str, str] = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {env.api_key}",
+    }
+    if env.llm_provider == "openrouter":
+        headers["HTTP-Referer"] = "http://localhost:5173"
+        headers["X-Title"] = "ChatTree Visualizer"
+    if env.llm_provider == "anthropic":
+        headers["anthropic-version"] = "2023-06-01"
+    return headers
+
+
+def get_httpx_client_kwargs(env: LlmEnv) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {"verify": False}
+    if env.proxy:
+        kwargs["proxy"] = env.proxy
+    return kwargs
+
+
+def build_stream_chat_params(
+    env: LlmEnv, context: List[Dict[str, str]]
+) -> Tuple[str, dict]:
+    """流式聊天请求（与 /ws chat 中逻辑一致）。"""
+    if env.llm_provider == "openai_compat":
+        max_tok = int(os.getenv("MAX_TOKENS", "4096"))
+        request_body = {
+            "model": env.model_name,
+            "messages": [{"role": m["role"], "content": m["content"]} for m in context],
+            "max_tokens": max_tok,
+            "stream": True,
+        }
+        return f"{env.base_url}/chat/completions", request_body
+    if env.llm_provider == "minimax":
+        max_ct = int(os.getenv("MAX_COMPLETION_TOKENS", "2048"))
+        request_body = {
+            "model": env.model_name,
+            "messages": [{"role": m["role"], "content": m["content"]} for m in context],
+            "stream": True,
+            "max_completion_tokens": max_ct,
+        }
+        return f"{env.base_url}/v1/text/chatcompletion_v2", request_body
+    if env.llm_provider == "openrouter":
+        request_body = {
+            "model": env.model_name,
+            "messages": context,
+            "max_tokens": 4096,
+            "stream": True,
+        }
+        return f"{env.base_url}/v1/chat/completions", request_body
+    request_body = {
+        "model": env.model_name,
+        "messages": context,
+        "max_tokens": 4096,
+        "stream": True,
+    }
+    return f"{env.base_url}/v1/messages", request_body
+
+
+def build_non_stream_branch_summary_params(
+    env: LlmEnv,
+    role_messages: List[Dict[str, str]],
+    system_text: str,
+) -> Tuple[str, dict]:
+    """分支摘要非流式请求。role_messages 仅含 user/assistant。"""
+    max_out = int(os.getenv("BRANCH_SUMMARY_MAX_TOKENS", "1024"))
+    if env.llm_provider == "anthropic":
+        request_body: Dict[str, Any] = {
+            "model": env.model_name,
+            "max_tokens": max_out,
+            "stream": False,
+            "system": system_text,
+            "messages": role_messages,
+        }
+        return f"{env.base_url}/v1/messages", request_body
+    if env.llm_provider == "openai_compat":
+        max_tok = int(os.getenv("MAX_TOKENS", "4096"))
+        line_msgs = [{"role": m["role"], "content": m["content"]} for m in role_messages]
+        return (
+            f"{env.base_url}/chat/completions",
+            {
+                "model": env.model_name,
+                "messages": [
+                    {"role": "system", "content": system_text},
+                    *line_msgs,
+                ],
+                "max_tokens": min(max_out, max_tok),
+                "stream": False,
+            },
+        )
+    if env.llm_provider == "minimax":
+        max_ct = int(os.getenv("MAX_COMPLETION_TOKENS", "2048"))
+        line_msgs = [{"role": m["role"], "content": m["content"]} for m in role_messages]
+        return (
+            f"{env.base_url}/v1/text/chatcompletion_v2",
+            {
+                "model": env.model_name,
+                "messages": [
+                    {"role": "system", "content": system_text},
+                    *line_msgs,
+                ],
+                "stream": False,
+                "max_completion_tokens": min(max_out, max_ct),
+            },
+        )
+    if env.llm_provider == "openrouter":
+        return (
+            f"{env.base_url}/v1/chat/completions",
+            {
+                "model": env.model_name,
+                "messages": [
+                    {"role": "system", "content": system_text},
+                    *role_messages,
+                ],
+                "max_tokens": min(max_out, 4096),
+                "stream": False,
+            },
+        )
+    raise ValueError(f"Unknown llm_provider: {env.llm_provider}")
+
+
+def parse_non_stream_response(env: LlmEnv, data: Dict[str, Any]) -> str:
+    if env.llm_provider in ("openai_compat", "openrouter"):
+        ch = data.get("choices", [])
+        if ch:
+            return (ch[0].get("message") or {}).get("content") or ""
+        return ""
+    if env.llm_provider == "minimax":
+        ch = data.get("choices", [])
+        if ch:
+            t = (ch[0].get("message") or {}).get("content")
+            if t:
+                return t
+        return str(data.get("reply", "") or data.get("text", "") or "")
+    for block in data.get("content", []):
+        if block.get("type") == "text" and "text" in block:
+            return str(block["text"])
+    if data.get("type") == "message" and data.get("content"):
+        c = data.get("content", [])
+        for block in c:
+            if block.get("type") == "text" and "text" in block:
+                return str(block["text"])
+    return ""
+
+
+async def run_llm_non_stream(
+    env: LlmEnv, role_messages: List[Dict[str, str]], system_text: str
+) -> str:
+    headers = build_llm_headers(env)
+    api_url, request_body = build_non_stream_branch_summary_params(
+        env, role_messages, system_text
+    )
+    async with httpx.AsyncClient(**get_httpx_client_kwargs(env)) as client:
+        r = await client.post(
+            api_url, headers=headers, json=request_body, timeout=120.0
+        )
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"LLM error {r.status_code}: {r.text[:2000]}"
+            )
+        return parse_non_stream_response(env, r.json()).strip()
 
 # ============ 数据模型 ============
 
@@ -149,6 +388,76 @@ async def create_branch(request: CreateBranchRequest):
 
     return CreateBranchResponse(node_id=node_id)
 
+
+class BranchSummaryRequest(BaseModel):
+    node_ids: List[str]
+
+
+class BranchSummaryResponse(BaseModel):
+    summary: str
+
+
+@app.post(
+    "/api/sessions/{session_key}/summary/branch",
+    response_model=BranchSummaryResponse,
+)
+async def branch_summary(session_key: str, body: BranchSummaryRequest):
+    """
+    根据前端给定的、属于某可视列轨的节点 id 有序列表，组装对话并生成一段话摘要。
+    服务端仅校验 id 均属于该 session，不在此按树做子树展开。
+    """
+    session = sessions.get(session_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not body.node_ids:
+        raise HTTPException(
+            status_code=400, detail="node_ids must not be empty"
+        )
+    if len(body.node_ids) > MAX_BRANCH_SUMMARY_NODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"At most {MAX_BRANCH_SUMMARY_NODES} nodes allowed",
+        )
+    role_messages: List[Dict[str, str]] = []
+    for nid in body.node_ids:
+        node = session.nodes.get(nid)
+        if not node:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid node_id: {nid}"
+            )
+        if node.role not in (MessageRole.USER, MessageRole.ASSISTANT):
+            continue
+        role_messages.append(
+            {"role": node.role, "content": node.content or ""}
+        )
+    if not role_messages:
+        raise HTTPException(
+            status_code=400, detail="No user/assistant content in node_ids"
+        )
+    system_text = os.getenv(
+        "BRANCH_SUMMARY_SYSTEM", DEFAULT_BRANCH_SUMMARY_SYSTEM
+    )
+    try:
+        env = get_llm_env()
+    except ValueError as e:
+        raise HTTPException(
+            status_code=500, detail=str(e)
+        ) from e
+    try:
+        text = await run_llm_non_stream(env, role_messages, system_text)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"LLM request failed: {e!s}",
+        ) from e
+    if not text:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Model returned an empty summary",
+        )
+    return BranchSummaryResponse(summary=text)
+
+
 # ============ WebSocket 端点 ============
 
 @app.websocket("/ws/{session_key}")
@@ -225,131 +534,30 @@ async def handle_chat_message(websocket: WebSocket, session_key: str, message: D
     try:
         print(f"[DEBUG] Preparing API request...")
 
-        # 配置代理
-        http_proxy = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
-        https_proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
-
-        # 过滤空字符串和空白字符串
-        proxy = None
-        if http_proxy and http_proxy.strip():
-            proxy = http_proxy.strip()
-        elif https_proxy and https_proxy.strip():
-            proxy = https_proxy.strip()
-
-        if proxy:
-            print(f"[DEBUG] Using proxy: {proxy}")
+        env = get_llm_env()
+        if env.proxy:
+            print(f"[DEBUG] Using proxy: {env.proxy}")
         else:
             print(f"[DEBUG] No proxy configured")
 
-        # 获取 API 配置（OPENAI_BASE_URL 优先：MiniMax 等 OpenAI 兼容网关）
-        openai_base = (os.getenv("OPENAI_BASE_URL") or "").strip()
-        if openai_base:
-            llm_provider = "openai_compat"
-            base_url = openai_base.rstrip("/")
-            default_model = "MiniMax-M2.5"
-            model_name = os.getenv("MODEL_NAME") or default_model
-            api_key = os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY")
-            if not api_key:
-                raise ValueError("OPENAI_API_KEY not configured (OPENAI_BASE_URL is set)")
-        else:
-            base_url = os.getenv("API_BASE_URL", "https://api.anthropic.com").rstrip("/")
-
-            llm_provider = (os.getenv("LLM_PROVIDER") or "").strip().lower()
-            if not llm_provider:
-                if "minimax" in base_url.lower():
-                    llm_provider = "minimax"
-                elif "openrouter" in base_url.lower():
-                    llm_provider = "openrouter"
-                else:
-                    llm_provider = "anthropic"
-
-            if llm_provider == "minimax":
-                default_model = "M2-her"
-            elif llm_provider == "openrouter":
-                default_model = "claude-sonnet-4-5"
-            else:
-                default_model = "claude-sonnet-4.5-20250514"
-
-            model_name = os.getenv("MODEL_NAME") or default_model
-
-            if llm_provider == "minimax":
-                api_key = os.getenv("MINIMAX_API_KEY") or os.getenv("API_KEY")
-                if not api_key:
-                    raise ValueError("MINIMAX_API_KEY not configured")
-            elif llm_provider == "openrouter":
-                api_key = (
-                    os.getenv("OPENROUTER_API_KEY")
-                    or os.getenv("ANTHROPIC_API_KEY")
-                    or os.getenv("API_KEY")
-                )
-                if not api_key:
-                    raise ValueError("OPENROUTER_API_KEY or ANTHROPIC_API_KEY not configured")
-            else:
-                api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("API_KEY")
-                if not api_key:
-                    raise ValueError("ANTHROPIC_API_KEY not configured")
-
-        print(f"[DEBUG] API Base URL: {base_url}")
-        print(f"[DEBUG] LLM provider: {llm_provider}")
-        print(f"[DEBUG] Model: {model_name}")
+        print(f"[DEBUG] API Base URL: {env.base_url}")
+        print(f"[DEBUG] LLM provider: {env.llm_provider}")
+        print(f"[DEBUG] Model: {env.model_name}")
 
         # 构建上下文
         context = session.get_context_path(user_node_id)
         print(f"[DEBUG] Context: {context}")
 
-        # 准备请求
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
-
-        if llm_provider == "openrouter":
-            headers["HTTP-Referer"] = "http://localhost:5173"
-            headers["X-Title"] = "ChatTree Visualizer"
-
-        # 构建请求体与 URL
-        if llm_provider == "openai_compat":
-            max_tok = int(os.getenv("MAX_TOKENS", "4096"))
-            request_body = {
-                "model": model_name,
-                "messages": [{"role": m["role"], "content": m["content"]} for m in context],
-                "max_tokens": max_tok,
-                "stream": True,
-            }
-            api_url = f"{base_url}/chat/completions"
-        elif llm_provider == "minimax":
-            max_ct = int(os.getenv("MAX_COMPLETION_TOKENS", "2048"))
-            request_body = {
-                "model": model_name,
-                "messages": [{"role": m["role"], "content": m["content"]} for m in context],
-                "stream": True,
-                "max_completion_tokens": max_ct,
-            }
-            api_url = f"{base_url}/v1/text/chatcompletion_v2"
-        elif llm_provider == "openrouter":
-            request_body = {
-                "model": model_name,
-                "messages": context,
-                "max_tokens": 4096,
-                "stream": True,
-            }
-            api_url = f"{base_url}/v1/chat/completions"
-        else:
-            request_body = {
-                "model": model_name,
-                "messages": context,
-                "max_tokens": 4096,
-                "stream": True,
-            }
-            api_url = f"{base_url}/v1/messages"
+        headers = build_llm_headers(env)
+        api_url, request_body = build_stream_chat_params(env, context)
 
         # OpenAI-style SSE: choices[].delta.content
-        use_openai_delta_stream = llm_provider in ("openrouter", "minimax", "openai_compat")
-
-        # 创建 httpx client
-        client_kwargs = {"verify": False}
-        if proxy:
-            client_kwargs["proxy"] = proxy
+        use_openai_delta_stream = env.llm_provider in (
+            "openrouter",
+            "minimax",
+            "openai_compat",
+        )
+        client_kwargs = get_httpx_client_kwargs(env)
 
         # 流式调用
         full_content = ""

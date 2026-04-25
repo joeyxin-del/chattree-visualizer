@@ -68,6 +68,25 @@ def main():
     # 测试获取会话
     test_get_session(session_key)
 
+    # 分支摘要：参数校验（不调 LLM）
+    try:
+        r0 = requests.post(
+            f"{BASE_URL}/api/sessions/{session_key}/summary/branch",
+            json={"node_ids": []},
+        )
+        assert r0.status_code == 400, f"空 node_ids 应返回 400，实际 {r0.status_code}"
+        print(f"✓ 分支摘要对空 node_ids: {r0.status_code}")
+        r1 = requests.post(
+            f"{BASE_URL}/api/sessions/{session_key}/summary/branch",
+            json={"node_ids": ["no_such_id"]},
+        )
+        assert r1.status_code == 400, f"非法 node 应 400，实际 {r1.status_code}"
+        print(f"✓ 分支摘要对非法 node_id: {r1.status_code}")
+    except AssertionError as e:
+        print(f"✗ 分支摘要校验测试失败: {e}")
+    except Exception as e:
+        print(f"✗ 分支摘要请求失败: {e}")
+
     print()
     print("=" * 50)
     print("✅ 所有测试通过！后端运行正常")
