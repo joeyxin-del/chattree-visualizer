@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 import os
+import re
 from dotenv import load_dotenv
 import httpx
 
@@ -31,11 +32,66 @@ active_connections: Dict[str, WebSocket] = {}
 
 MAX_BRANCH_SUMMARY_NODES = int(os.getenv("MAX_BRANCH_SUMMARY_NODES", "200"))
 DEFAULT_BRANCH_SUMMARY_SYSTEM = (
-    "你是对话分支的摘要器。根据下方 user/assistant 消息，只输出一段连续中文（约 3～8 句），概括主题与结论。"
-    "严格要求：禁止编号与分条（不要用 1.2.3. 或「一、二、」）、禁止小标题、禁止 Markdown（**、#、列表），"
-    "禁止复述原文的列举结构；即使原文是分条回答，摘要也必须合并为一段散文。"
+    "你是对话分支的摘要器。下方是按时间顺序的多轮 user/assistant，你必须做**均衡式总结**，不能只放大最后一轮。"
+    "【均衡约束（须同时满足）】"
+    "（1）全文约 5～12 句，合并为一段连续中文；"
+    "（2）**开篇 1～2 句**须交代：用户最初问什么、话题从哪起头（不得用回答最后一问作为全文开头）；"
+    "（3）中间若干句按对话推进顺序，分别点到**每一轮用户问题的主题**及助手回应的要点，轮次越靠前越不可省略为一句带过；若某轮仅寒暄可一句略写，但不得整段只剩最后几轮；"
+    "（4）**最后 1～2 句**再收束到当前分支的结论或最新进展，避免全文只写「用户最后一问」及其回答；"
+    "（5）若多轮在讨论同一主题（如从介绍人物追问到结局），须写出「如何由浅入深」，而非只写结局段。"
+    "【形式】禁止编号与分条（不要用 1.2.3.）、禁止小标题、禁止 Markdown（**、#、引用的 >、列表破折号），只输出一段散文。"
     "不要输出思考过程、XML/标签或旁白。若几乎无信息，只输出：无内容可总结。"
 )
+
+# 摘要前去掉模型思考块（如 redacted_thinking），否则长段内部推理会占满注意力，摘要易「只像最后一问」
+_THINKING_PAIR = re.compile(
+    r"<\s*(?:think|thinking|redacted_thinking|reasoning)\b[^>]*>[\s\S]*?"
+    r"</\s*(?:think|thinking|redacted_thinking|reasoning)\s*>",
+    re.IGNORECASE,
+)
+
+
+def strip_thinking_for_summary(text: str) -> str:
+    """去掉 redacted_thinking / think 等成对标签块，仅保留对用户可见的正文。"""
+    if not text or not text.strip():
+        return text
+    s = text
+    for _ in range(6):
+        t = _THINKING_PAIR.sub("", s)
+        if t == s:
+            break
+        s = t
+    s = re.sub(
+        r"<\s*/?\s*redacted_thinking\s*/?>", "", s, flags=re.IGNORECASE
+    )
+    s = re.sub(r"<\s*/?\s*think(?:ing)?\s*/?>", "", s, flags=re.IGNORECASE)
+    return s.strip()
+
+
+def postprocess_branch_summary_output(text: str) -> str:
+    """
+    摘要后处理：去掉模型常违规输出的 Markdown/列表/标题，合并为单段，便于与系统提示一致。
+    设 BRANCH_SUMMARY_NO_POSTPROCESS=1/true 可跳过（调试用）。
+    """
+    if not text or not text.strip():
+        return text
+    if (os.getenv("BRANCH_SUMMARY_NO_POSTPROCESS", "").strip() or "").lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return text.strip()
+    s = text
+    s = s.replace("**", "").replace("__", "")
+    s = re.sub(r"(?m)^#+\s*", "", s)
+    s = re.sub(r"(?m)^>\s*", "", s)
+    s = re.sub(r"(?m)^[\-\*]\s+", "", s)
+    s = re.sub(r"(?m)^\d+\.\s+", "", s)
+    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    s = " ".join(lines)
+    s = re.sub(r"[ \t\u3000]+", " ", s)
+    s = s.strip()
+    return s
 
 
 def _branch_summary_temperature() -> float:
@@ -273,6 +329,24 @@ async def run_llm_non_stream(
     api_url, request_body = build_non_stream_branch_summary_params(
         env, role_messages, system_text
     )
+    # 与上游实际一致：完整的 HTTP JSON body（含 system/messages、temperature 等）
+    _log_body = (os.getenv("BRANCH_SUMMARY_LOG_LLM_BODY", "1") or "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+    if _log_body:
+        try:
+            body_json = json.dumps(
+                request_body, ensure_ascii=False, indent=2
+            )
+        except (TypeError, ValueError):
+            body_json = repr(request_body)
+        print(f"[DEBUG] branch_summary 发往 LLM: POST {api_url}")
+        print(
+            f"[DEBUG] branch_summary 发往 LLM: request_body（完整消息体）=\n{body_json}"
+        )
+
     async with httpx.AsyncClient(**get_httpx_client_kwargs(env)) as client:
         r = await client.post(
             api_url, headers=headers, json=request_body, timeout=120.0
@@ -441,13 +515,45 @@ async def branch_summary(session_key: str, body: BranchSummaryRequest):
             )
         if node.role not in (MessageRole.USER, MessageRole.ASSISTANT):
             continue
+        raw = node.content or ""
         role_messages.append(
-            {"role": node.role, "content": node.content or ""}
+            {
+                "role": node.role,
+                "content": strip_thinking_for_summary(raw)
+                if node.role == MessageRole.ASSISTANT
+                else raw,
+            }
         )
     if not role_messages:
         raise HTTPException(
             status_code=400, detail="No user/assistant content in node_ids"
         )
+    # 终端校对：与送入 LLM 的 node_ids、逐条 message 一致，便于和前端 Network 对照
+    _log_full = (os.getenv("BRANCH_SUMMARY_LOG_FULL", "").strip() or "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    print(
+        f"[DEBUG] branch_summary 校对: node_ids 共 {len(body.node_ids)} 个: {body.node_ids}"
+    )
+    print(
+        f"[DEBUG] branch_summary 校对: 送入 LLM 的 user/assistant 共 {len(role_messages)} 条"
+    )
+    for i, m in enumerate(role_messages):
+        c = m.get("content") or ""
+        if _log_full:
+            print(
+                f"[DEBUG] branch_summary 校对: [{i}] role={m.get('role')} len={len(c)}"
+            )
+            print(f"[DEBUG] branch_summary 校对:     content={c!r}")
+        else:
+            prev = c if len(c) <= 500 else c[:500] + "…"
+            print(
+                f"[DEBUG] branch_summary 校对: [{i}] role={m.get('role')} "
+                f"len={len(c)} content={prev!r}"
+            )
+
     system_text = os.getenv(
         "BRANCH_SUMMARY_SYSTEM", DEFAULT_BRANCH_SUMMARY_SYSTEM
     )
@@ -464,11 +570,17 @@ async def branch_summary(session_key: str, body: BranchSummaryRequest):
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"LLM request failed: {e!s}",
         ) from e
+    text = strip_thinking_for_summary(text)
+    text = postprocess_branch_summary_output(text)
     if not text:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Model returned an empty summary",
         )
+    st = text if len(text) <= 300 else text[:300] + "…"
+    print(
+        f"[DEBUG] branch_summary 校对: 返回摘要 len={len(text)} preview={st!r}"
+    )
     return BranchSummaryResponse(summary=text)
 
 
