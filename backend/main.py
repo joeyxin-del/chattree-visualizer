@@ -32,7 +32,8 @@ active_connections: Dict[str, WebSocket] = {}
 
 MAX_BRANCH_SUMMARY_NODES = int(os.getenv("MAX_BRANCH_SUMMARY_NODES", "200"))
 DEFAULT_BRANCH_SUMMARY_SYSTEM = (
-    "你是对话分支的摘要器。下方是按时间顺序的多轮 user/assistant，你必须做**均衡式总结**，不能只放大最后一轮。"
+    "你是对话分支的摘要器。下方是按时间顺序的多轮对话实录：每轮两行，第一行为「[序号] user」或「[序号] assistant」（从 0 起），"
+    "第二行为该轮正文；须按序号顺序通读全文后做**均衡式总结**，不能只放大最后一轮。"
     "【均衡约束（须同时满足）】"
     "（1）全文约 5～12 句，合并为一段连续中文；"
     "（2）**开篇 1～2 句**须交代：用户最初问什么、话题从哪起头（不得用回答最后一问作为全文开头）；"
@@ -98,6 +99,24 @@ def _branch_summary_temperature() -> float:
     """摘要任务略降温度，减少「像原文一样分条」的倾向；可用 BRANCH_SUMMARY_TEMPERATURE 覆盖。"""
     raw = (os.getenv("BRANCH_SUMMARY_TEMPERATURE", "0.35") or "").strip()
     return float(raw) if raw else 0.35
+
+
+def format_branch_summary_indexed_transcript(
+    role_messages: List[Dict[str, str]],
+) -> str:
+    """
+    将多轮 user/assistant 压成纯文本（带序号与角色名），避免请求体里多条 message
+    的 JSON 结构使部分 OpenAI 兼容接口过度关注末轮。
+    """
+    parts: List[str] = []
+    for i, m in enumerate(role_messages):
+        role = (m.get("role") or "").strip()
+        content = (m.get("content") or "").strip()
+        parts.append(f"[{i}] {role}")
+        parts.append(content if content else "(空)")
+        parts.append("")
+    return "\n".join(parts).rstrip()
+
 
 @dataclass
 class LlmEnv:
@@ -236,29 +255,30 @@ def build_non_stream_branch_summary_params(
     role_messages: List[Dict[str, str]],
     system_text: str,
 ) -> Tuple[str, dict]:
-    """分支摘要非流式请求。role_messages 仅含 user/assistant。"""
+    """分支摘要非流式请求。role_messages 仅含 user/assistant；发往 LLM 时合并为单条 user 纯文本实录。"""
     max_out = int(os.getenv("BRANCH_SUMMARY_MAX_TOKENS", "1024"))
     temp = _branch_summary_temperature()
+    transcript = format_branch_summary_indexed_transcript(role_messages)
+    transcript_msg = {"role": "user", "content": transcript}
     if env.llm_provider == "anthropic":
         request_body: Dict[str, Any] = {
             "model": env.model_name,
             "max_tokens": max_out,
             "stream": False,
             "system": system_text,
-            "messages": role_messages,
+            "messages": [transcript_msg],
             "temperature": temp,
         }
         return f"{env.base_url}/v1/messages", request_body
     if env.llm_provider == "openai_compat":
         max_tok = int(os.getenv("MAX_TOKENS", "4096"))
-        line_msgs = [{"role": m["role"], "content": m["content"]} for m in role_messages]
         return (
             f"{env.base_url}/chat/completions",
             {
                 "model": env.model_name,
                 "messages": [
                     {"role": "system", "content": system_text},
-                    *line_msgs,
+                    transcript_msg,
                 ],
                 "max_tokens": min(max_out, max_tok),
                 "stream": False,
@@ -267,14 +287,13 @@ def build_non_stream_branch_summary_params(
         )
     if env.llm_provider == "minimax":
         max_ct = int(os.getenv("MAX_COMPLETION_TOKENS", "2048"))
-        line_msgs = [{"role": m["role"], "content": m["content"]} for m in role_messages]
         return (
             f"{env.base_url}/v1/text/chatcompletion_v2",
             {
                 "model": env.model_name,
                 "messages": [
                     {"role": "system", "content": system_text},
-                    *line_msgs,
+                    transcript_msg,
                 ],
                 "stream": False,
                 "max_completion_tokens": min(max_out, max_ct),
@@ -288,7 +307,7 @@ def build_non_stream_branch_summary_params(
                 "model": env.model_name,
                 "messages": [
                     {"role": "system", "content": system_text},
-                    *role_messages,
+                    transcript_msg,
                 ],
                 "max_tokens": min(max_out, 4096),
                 "stream": False,
@@ -342,9 +361,10 @@ async def run_llm_non_stream(
             )
         except (TypeError, ValueError):
             body_json = repr(request_body)
-        print(f"[DEBUG] branch_summary 发往 LLM: POST {api_url}")
+        print(f"[DEBUG] branch_summary 发往 LLM: POST {api_url}", flush=True)
         print(
-            f"[DEBUG] branch_summary 发往 LLM: request_body（完整消息体）=\n{body_json}"
+            f"[DEBUG] branch_summary 发往 LLM: request_body（完整消息体）=\n{body_json}",
+            flush=True,
         )
 
     async with httpx.AsyncClient(**get_httpx_client_kwargs(env)) as client:
@@ -535,23 +555,27 @@ async def branch_summary(session_key: str, body: BranchSummaryRequest):
         "yes",
     )
     print(
-        f"[DEBUG] branch_summary 校对: node_ids 共 {len(body.node_ids)} 个: {body.node_ids}"
+        f"[DEBUG] branch_summary 校对: node_ids 共 {len(body.node_ids)} 个: {body.node_ids}",
+        flush=True,
     )
     print(
-        f"[DEBUG] branch_summary 校对: 送入 LLM 的 user/assistant 共 {len(role_messages)} 条"
+        f"[DEBUG] branch_summary 校对: 送入 LLM 的 user/assistant 共 {len(role_messages)} 条",
+        flush=True,
     )
     for i, m in enumerate(role_messages):
         c = m.get("content") or ""
         if _log_full:
             print(
-                f"[DEBUG] branch_summary 校对: [{i}] role={m.get('role')} len={len(c)}"
+                f"[DEBUG] branch_summary 校对: [{i}] role={m.get('role')} len={len(c)}",
+                flush=True,
             )
-            print(f"[DEBUG] branch_summary 校对:     content={c!r}")
+            print(f"[DEBUG] branch_summary 校对:     content={c!r}", flush=True)
         else:
             prev = c if len(c) <= 500 else c[:500] + "…"
             print(
                 f"[DEBUG] branch_summary 校对: [{i}] role={m.get('role')} "
-                f"len={len(c)} content={prev!r}"
+                f"len={len(c)} content={prev!r}",
+                flush=True,
             )
 
     system_text = os.getenv(
@@ -579,7 +603,8 @@ async def branch_summary(session_key: str, body: BranchSummaryRequest):
         )
     st = text if len(text) <= 300 else text[:300] + "…"
     print(
-        f"[DEBUG] branch_summary 校对: 返回摘要 len={len(text)} preview={st!r}"
+        f"[DEBUG] branch_summary 校对: 返回摘要 len={len(text)} preview={st!r}",
+        flush=True,
     )
     return BranchSummaryResponse(summary=text)
 
