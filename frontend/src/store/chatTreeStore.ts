@@ -14,6 +14,8 @@ interface ChatTreeStore {
   updateNode: (id: string, updates: Partial<ChatNode>) => void;
   setFocus: (id: string | null) => void;
   clearNodes: () => void;
+  /** 从历史或后端快照恢复整棵树（替换当前节点与根列表） */
+  hydrateSession: (nodes: Record<string, ChatNode>, rootNodes: string[]) => void;
 
   // 查询
   getNode: (id: string) => ChatNode | undefined;
@@ -61,6 +63,21 @@ export const useChatTreeStore = create<ChatTreeStore>((set, get) => ({
   setFocus: (id: string | null) => set({ focusedNodeId: id }),
 
   clearNodes: () => set({ nodes: new Map(), rootNodes: [], focusedNodeId: null }),
+
+  hydrateSession: (rawNodes, rootNodes) => {
+    const next = new Map<string, ChatNode>();
+    for (const [id, n] of Object.entries(rawNodes)) {
+      next.set(id, {
+        ...n,
+        children: Array.isArray(n.children) ? [...n.children] : [],
+      });
+    }
+    set({
+      nodes: next,
+      rootNodes: [...rootNodes],
+      focusedNodeId: null,
+    });
+  },
 
   getNode: (id: string) => get().nodes.get(id),
 

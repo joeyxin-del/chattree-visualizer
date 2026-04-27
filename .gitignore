@@ -37,6 +37,9 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 
+# Persisted chat sessions (local)
+backend/data/
+
 # Build
 *.pyc
 *.pyo

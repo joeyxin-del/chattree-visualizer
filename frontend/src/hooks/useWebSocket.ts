@@ -2,6 +2,21 @@ import { useEffect, useRef, useCallback } from 'react';
 import { useChatTreeStore } from '../store/chatTreeStore';
 import type { ChatNode, WSMessage, ChatMessageRequest } from '../types';
 
+const LAST_SESSION_STORAGE_KEY = 'tree-visualizer-last-session';
+
+export type SessionListItem = {
+  session_key: string;
+  updated_at: number;
+  node_count: number;
+  preview: string;
+};
+
+export type SessionSnapshot = {
+  session_key: string;
+  nodes: Record<string, ChatNode>;
+  root_nodes: string[];
+};
+
 export interface WebSocketHandlers {
   /** 新节点写入 store 之后调用（用于跟流到最新用户/助手） */
   onNodeCreated?: (node: ChatNode) => void;
@@ -151,4 +166,46 @@ export async function createSession(): Promise<string> {
   }
   const data = await response.json();
   return data.session_key;
+}
+
+export async function listSessions(): Promise<SessionListItem[]> {
+  const url = joinUrl(getApiBase(), '/api/sessions');
+  const response = await fetch(url);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`listSessions failed: ${response.status} ${text}`);
+  }
+  const data = await response.json();
+  return data.sessions ?? [];
+}
+
+export async function fetchSessionSnapshot(
+  sessionKey: string
+): Promise<SessionSnapshot> {
+  const url = joinUrl(
+    getApiBase(),
+    `/api/sessions/${encodeURIComponent(sessionKey)}`
+  );
+  const response = await fetch(url);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`fetchSession failed: ${response.status} ${text}`);
+  }
+  return response.json();
+}
+
+export function rememberSessionKey(sessionKey: string) {
+  try {
+    localStorage.setItem(LAST_SESSION_STORAGE_KEY, sessionKey);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getStoredSessionKey(): string | null {
+  try {
+    return localStorage.getItem(LAST_SESSION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
 }

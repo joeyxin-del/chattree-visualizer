@@ -1,20 +1,51 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useChatTreeStore } from '../store/chatTreeStore';
-import { useWebSocket, createSession } from '../hooks/useWebSocket';
+import {
+  useWebSocket,
+  createSession,
+  listSessions,
+  fetchSessionSnapshot,
+  rememberSessionKey,
+  getStoredSessionKey,
+  type SessionListItem,
+} from '../hooks/useWebSocket';
 import { BranchVisualizer } from './BranchVisualizer';
 import { ChatView } from './ChatView';
 import { Button } from './ui/button';
 import type { ChatNode } from '../types';
-import { Send, Sparkles } from 'lucide-react';
+import { History, Plus, Send, Sparkles } from 'lucide-react';
+
+function formatSessionTime(ts: number) {
+  try {
+    return new Date(ts * 1000).toLocaleString('zh-CN', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return '';
+  }
+}
 
 export function ChatTreeView() {
-  const { nodes, rootNodes, sessionKey, setSessionKey } = useChatTreeStore();
+  const {
+    nodes,
+    rootNodes,
+    sessionKey,
+    setSessionKey,
+    hydrateSession,
+    clearNodes,
+  } = useChatTreeStore();
 
   /** 为 true 时：新消息/流式完成后自动切到最新用户或助手节点（类似 ChatGPT）；点击左侧分支后为 false */
   const followLatestRef = useRef(true);
   const [inputMessage, setInputMessage] = useState('');
   const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
   const pendingBranchRef = useRef<{ parentId: string; since: number; firstMessage: string } | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyItems, setHistoryItems] = useState<SessionListItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const wsHandlers = useMemo(
     () => ({
@@ -37,19 +68,87 @@ export function ChatTreeView() {
 
   const { sendMessage } = useWebSocket(sessionKey, wsHandlers);
 
-  // 初始化会话（开发环境走 Vite 代理 /api -> :8000，需先启动后端）
-  useEffect(() => {
-    if (!sessionKey) {
-      createSession()
-        .then(setSessionKey)
-        .catch((err) => {
-          console.error(
-            'Failed to create session. Is the backend running on port 8000? (e.g. start-backend.cmd)',
-            err
-          );
-        });
+  const loadHistoryList = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      setHistoryItems(await listSessions());
+    } catch (err) {
+      console.error('加载历史会话失败', err);
+    } finally {
+      setHistoryLoading(false);
     }
-  }, [sessionKey, setSessionKey]);
+  }, []);
+
+  useEffect(() => {
+    if (historyOpen) loadHistoryList();
+  }, [historyOpen, loadHistoryList]);
+
+  // 初始化：优先恢复 localStorage 中的会话，否则新建（数据由后端 JSON 持久化）
+  useEffect(() => {
+    if (sessionKey) return;
+    let cancelled = false;
+    (async () => {
+      const stored = getStoredSessionKey();
+      if (stored) {
+        try {
+          const snap = await fetchSessionSnapshot(stored);
+          if (cancelled) return;
+          hydrateSession(snap.nodes, snap.root_nodes);
+          setSessionKey(snap.session_key);
+          rememberSessionKey(snap.session_key);
+          return;
+        } catch {
+          /* 本地记录的会话可能已被删或后端未就绪，回落为新建 */
+        }
+      }
+      try {
+        const key = await createSession();
+        if (cancelled) return;
+        clearNodes();
+        setSessionKey(key);
+        rememberSessionKey(key);
+      } catch (err) {
+        console.error(
+          '无法创建会话。后端是否在 :8000 运行？（可运行 start-backend.cmd）',
+          err
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionKey, setSessionKey, hydrateSession, clearNodes]);
+
+  const handleNewChat = useCallback(async () => {
+    try {
+      const key = await createSession();
+      clearNodes();
+      setSessionKey(key);
+      rememberSessionKey(key);
+      setCurrentNodeId(null);
+      followLatestRef.current = true;
+      setHistoryOpen(false);
+    } catch (err) {
+      console.error('新建会话失败', err);
+    }
+  }, [clearNodes, setSessionKey]);
+
+  const handleOpenHistorySession = useCallback(
+    async (key: string) => {
+      try {
+        const snap = await fetchSessionSnapshot(key);
+        hydrateSession(snap.nodes, snap.root_nodes);
+        setSessionKey(snap.session_key);
+        rememberSessionKey(snap.session_key);
+        setCurrentNodeId(null);
+        followLatestRef.current = true;
+        setHistoryOpen(false);
+      } catch (err) {
+        console.error('打开会话失败', err);
+      }
+    },
+    [hydrateSession, setSessionKey]
+  );
 
   // 获取当前分支路径
   const currentBranchPath = useMemo(() => {
@@ -161,11 +260,80 @@ export function ChatTreeView() {
               </p>
             </div>
           </div>
-          <div className="text-xs text-muted-foreground">
-            {nodes.size} 个节点 · {rootNodes.length} 个根分支
+          <div className="flex items-center gap-2">
+            <div className="relative z-50">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                onClick={() => setHistoryOpen((o) => !o)}
+              >
+                <History className="w-4 h-4" />
+                历史
+              </Button>
+              {historyOpen ? (
+                <div className="absolute right-0 top-full mt-2 w-[min(100vw-2rem,22rem)] rounded-xl border bg-card shadow-lg">
+                  <div className="border-b px-3 py-2 text-xs font-medium text-muted-foreground">
+                    已保存的会话
+                  </div>
+                  <div className="max-h-72 overflow-y-auto p-1">
+                    {historyLoading ? (
+                      <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+                        加载中…
+                      </p>
+                    ) : historyItems.length === 0 ? (
+                      <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+                        暂无记录
+                      </p>
+                    ) : (
+                      historyItems.map((item) => (
+                        <button
+                          key={item.session_key}
+                          type="button"
+                          onClick={() => handleOpenHistorySession(item.session_key)}
+                          className={`flex w-full flex-col gap-0.5 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
+                            item.session_key === sessionKey ? 'bg-muted/80' : ''
+                          }`}
+                        >
+                          <span className="line-clamp-2 text-foreground">
+                            {item.preview || '（空会话）'}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">
+                            {formatSessionTime(item.updated_at)} · {item.node_count}{' '}
+                            个节点
+                          </span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            <Button
+              type="button"
+              variant="default"
+              size="sm"
+              className="gap-1.5"
+              onClick={handleNewChat}
+            >
+              <Plus className="w-4 h-4" />
+              新对话
+            </Button>
+            <div className="text-xs text-muted-foreground whitespace-nowrap">
+              {nodes.size} 节点 · {rootNodes.length} 根
+            </div>
           </div>
         </div>
       </div>
+      {historyOpen ? (
+        <button
+          type="button"
+          className="fixed inset-0 z-40 cursor-default bg-black/20"
+          aria-label="关闭历史列表"
+          onClick={() => setHistoryOpen(false)}
+        />
+      ) : null}
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">

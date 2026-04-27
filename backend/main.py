@@ -4,9 +4,11 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 import json
 import os
 import re
+import time
 from dotenv import load_dotenv
 import httpx
 
@@ -29,6 +31,77 @@ app.add_middleware(
 # 全局状态
 sessions: Dict[str, "ChatSession"] = {}
 active_connections: Dict[str, WebSocket] = {}
+
+# 会话持久化目录（每会话一个 JSON）
+PERSIST_DIR = Path(
+    os.getenv(
+        "CHAT_DATA_DIR",
+        str(Path(__file__).resolve().parent / "data" / "sessions"),
+    )
+).resolve()
+STREAM_PERSIST_INTERVAL_SEC = float(
+    (os.getenv("CHAT_STREAM_PERSIST_INTERVAL_SEC", "1.0") or "1.0").strip()
+    or "1.0"
+)
+
+
+def _persist_path(session_key: str) -> Path:
+    if ".." in session_key or "/" in session_key or "\\" in session_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid session key",
+        )
+    return PERSIST_DIR / f"{session_key}.json"
+
+
+def session_to_payload(session: "ChatSession") -> Dict[str, Any]:
+    return {
+        "session_key": session.session_key,
+        "updated_at": datetime.now().timestamp(),
+        "root_nodes": list(session.root_nodes),
+        "active_branches": list(session.active_branches),
+        "nodes": {nid: node.model_dump() for nid, node in session.nodes.items()},
+    }
+
+
+def persist_session(session: "ChatSession") -> None:
+    """将会话写入磁盘（覆盖同名文件）。"""
+    try:
+        PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+        path = _persist_path(session.session_key)
+        payload = session_to_payload(session)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    except HTTPException:
+        raise
+    except OSError as e:
+        print(f"[WARN] persist_session failed: {e}", flush=True)
+
+
+def session_from_payload(data: Dict[str, Any]) -> "ChatSession":
+    s = ChatSession(data["session_key"])
+    s.root_nodes = list(data.get("root_nodes", []))
+    s.active_branches = set(data.get("active_branches", []))
+    for nid, raw in data.get("nodes", {}).items():
+        s.nodes[nid] = ChatNode(**raw)
+    return s
+
+
+def load_session_from_disk(session_key: str) -> Optional["ChatSession"]:
+    try:
+        path = _persist_path(session_key)
+    except HTTPException:
+        return None
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return session_from_payload(data)
+    except Exception as e:
+        print(f"[WARN] load_session_from_disk {session_key}: {e}", flush=True)
+        return None
 
 MAX_BRANCH_SUMMARY_NODES = int(os.getenv("MAX_BRANCH_SUMMARY_NODES", "200"))
 DEFAULT_BRANCH_SUMMARY_SYSTEM = (
@@ -444,6 +517,7 @@ async def create_session(request: CreateSessionRequest):
     """创建新会话"""
     session_key = request.session_key or f"session_{datetime.now().timestamp()}"
     sessions[session_key] = ChatSession(session_key)
+    persist_session(sessions[session_key])
     return CreateSessionResponse(session_key=session_key)
 
 class GetSessionResponse(BaseModel):
@@ -451,10 +525,66 @@ class GetSessionResponse(BaseModel):
     nodes: Dict[str, ChatNode]
     root_nodes: List[str]
 
+class SessionMeta(BaseModel):
+    session_key: str
+    updated_at: float
+    node_count: int
+    preview: str
+
+class SessionListResponse(BaseModel):
+    sessions: List[SessionMeta]
+
+@app.get("/api/sessions", response_model=SessionListResponse)
+async def list_saved_sessions():
+    """列出已持久化的会话（按文件修改时间倒序）。"""
+    PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+    items: List[SessionMeta] = []
+    for path in sorted(
+        PERSIST_DIR.glob("*.json"),
+        key=lambda p: p.stat().st_mtime_ns,
+        reverse=True,
+    ):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            sk = str(data.get("session_key", path.stem))
+            nodes = data.get("nodes", {})
+            preview = ""
+            node_count = len(nodes) if isinstance(nodes, dict) else 0
+            if isinstance(nodes, dict):
+                users = [
+                    n
+                    for n in nodes.values()
+                    if isinstance(n, dict)
+                    and n.get("role") == MessageRole.USER
+                    and str(n.get("content") or "").strip()
+                ]
+                if users:
+                    users.sort(key=lambda n: float(n.get("timestamp", 0)))
+                    c = str(users[0].get("content") or "")
+                    preview = c if len(c) <= 120 else c[:120] + "…"
+            items.append(
+                SessionMeta(
+                    session_key=sk,
+                    updated_at=float(
+                        data.get("updated_at", path.stat().st_mtime)
+                    ),
+                    node_count=node_count,
+                    preview=preview,
+                )
+            )
+        except Exception:
+            continue
+    return SessionListResponse(sessions=items)
+
 @app.get("/api/sessions/{session_key}", response_model=GetSessionResponse)
 async def get_session(session_key: str):
-    """获取会话数据"""
+    """获取会话数据（内存中无则从磁盘加载）。"""
     session = sessions.get(session_key)
+    if not session:
+        loaded = load_session_from_disk(session_key)
+        if loaded:
+            sessions[session_key] = loaded
+            session = loaded
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -493,6 +623,7 @@ async def create_branch(request: CreateBranchRequest):
     )
 
     session.add_node(user_node)
+    persist_session(session)
 
     return CreateBranchResponse(node_id=node_id)
 
@@ -656,6 +787,7 @@ async def handle_chat_message(websocket: WebSocket, session_key: str, message: D
         status=NodeStatus.COMPLETED
     )
     session.add_node(user_node)
+    persist_session(session)
 
     # 发送用户节点创建通知
     await websocket.send_json({
@@ -674,6 +806,7 @@ async def handle_chat_message(websocket: WebSocket, session_key: str, message: D
         status=NodeStatus.STREAMING
     )
     session.add_node(assistant_node)
+    persist_session(session)
 
     # 发送助手节点创建通知
     await websocket.send_json({
@@ -712,6 +845,7 @@ async def handle_chat_message(websocket: WebSocket, session_key: str, message: D
 
         # 流式调用
         full_content = ""
+        last_stream_persist = 0.0
         print(f"[DEBUG] Starting stream...")
 
         async with httpx.AsyncClient(**client_kwargs) as client:
@@ -745,6 +879,13 @@ async def handle_chat_message(websocket: WebSocket, session_key: str, message: D
                                         "node_id": assistant_node_id,
                                         "content": full_content
                                     })
+                                    now_m = time.monotonic()
+                                    if (
+                                        now_m - last_stream_persist
+                                        >= STREAM_PERSIST_INTERVAL_SEC
+                                    ):
+                                        persist_session(session)
+                                        last_stream_persist = now_m
                         else:
                             # Anthropic 原生 Messages SSE
                             if data.get("type") == "content_block_delta":
@@ -757,12 +898,20 @@ async def handle_chat_message(websocket: WebSocket, session_key: str, message: D
                                         "node_id": assistant_node_id,
                                         "content": full_content
                                     })
+                                    now_m = time.monotonic()
+                                    if (
+                                        now_m - last_stream_persist
+                                        >= STREAM_PERSIST_INTERVAL_SEC
+                                    ):
+                                        persist_session(session)
+                                        last_stream_persist = now_m
                     except json.JSONDecodeError:
                         continue
 
         # 完成
         print(f"[DEBUG] Stream completed. Full content length: {len(full_content)}")
         assistant_node.status = NodeStatus.COMPLETED
+        persist_session(session)
         await websocket.send_json({
             "type": "node_completed",
             "node_id": assistant_node_id,
@@ -775,6 +924,7 @@ async def handle_chat_message(websocket: WebSocket, session_key: str, message: D
         traceback.print_exc()
         assistant_node.status = NodeStatus.ABORTED
         assistant_node.content = f"Error: {str(e)}"
+        persist_session(session)
         await websocket.send_json({
             "type": "node_error",
             "node_id": assistant_node_id,
