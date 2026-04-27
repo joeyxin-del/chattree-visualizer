@@ -1,5 +1,6 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, status
+from fastapi import FastAPI, File, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
@@ -45,6 +46,7 @@ STREAM_PERSIST_INTERVAL_SEC = float(
 )
 
 DATA_DIR = PERSIST_DIR.parent
+PDF_DIR = (DATA_DIR / "pdfs").resolve()
 LLM_CONFIG_PATH = Path(
     os.getenv("LLM_CONFIG_FILE", str(DATA_DIR / "llm_config.json"))
 ).resolve()
@@ -67,6 +69,8 @@ def session_to_payload(session: "ChatSession") -> Dict[str, Any]:
         "updated_at": datetime.now().timestamp(),
         "root_nodes": list(session.root_nodes),
         "active_branches": list(session.active_branches),
+        "pdf_stored_name": session.pdf_stored_name,
+        "pdf_display_name": session.pdf_display_name,
         "nodes": {nid: node.model_dump() for nid, node in session.nodes.items()},
     }
 
@@ -91,6 +95,8 @@ def session_from_payload(data: Dict[str, Any]) -> "ChatSession":
     s = ChatSession(data["session_key"])
     s.root_nodes = list(data.get("root_nodes", []))
     s.active_branches = set(data.get("active_branches", []))
+    s.pdf_stored_name = data.get("pdf_stored_name")
+    s.pdf_display_name = data.get("pdf_display_name")
     for nid, raw in data.get("nodes", {}).items():
         s.nodes[nid] = ChatNode(**raw)
     return s
@@ -376,12 +382,24 @@ def build_stream_chat_params(
             "stream": True,
         }
         return f"{env.base_url}/v1/chat/completions", request_body
-    request_body = {
+    # Anthropic：首条 system 用顶层 system 字段，避免与 Messages API 角色约束冲突
+    system_text: Optional[str] = None
+    rest_messages: List[Dict[str, str]] = []
+    for m in context:
+        if m.get("role") == "system" and not rest_messages and system_text is None:
+            system_text = m.get("content") or ""
+        else:
+            rest_messages.append(
+                {"role": m["role"], "content": m.get("content") or ""}
+            )
+    request_body: Dict[str, Any] = {
         "model": env.model_name,
-        "messages": context,
+        "messages": rest_messages,
         "max_tokens": 4096,
         "stream": True,
     }
+    if system_text is not None and system_text != "":
+        request_body["system"] = system_text
     return f"{env.base_url}/v1/messages", request_body
 
 
@@ -534,6 +552,15 @@ class ChatNode(BaseModel):
     branch_label: Optional[str] = None
     timestamp: float
     status: str = NodeStatus.PENDING
+    # PDF / 章节目录
+    node_kind: Optional[str] = None
+    document_title: Optional[str] = None
+    chapter_order: Optional[int] = None
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    source_page: Optional[int] = None
+    quote_excerpt: Optional[str] = None
+
 
 class ChatSession:
     def __init__(self, session_key: str):
@@ -541,6 +568,8 @@ class ChatSession:
         self.nodes: Dict[str, ChatNode] = {}
         self.root_nodes: List[str] = []
         self.active_branches: set = set()
+        self.pdf_stored_name: Optional[str] = None
+        self.pdf_display_name: Optional[str] = None
 
     def add_node(self, node: ChatNode):
         self.nodes[node.id] = node
@@ -553,7 +582,7 @@ class ChatSession:
                 self.root_nodes.append(node.id)
 
     def get_context_path(self, node_id: str) -> List[Dict[str, str]]:
-        """构建从根到当前节点的上下文路径"""
+        """构建从根到当前节点的上下文路径（原始链；流式前请用 normalize_context_for_stream）。"""
         path = []
         current_id = node_id
 
@@ -565,6 +594,187 @@ class ChatSession:
             current_id = node.parent_id
 
         return path
+
+
+def get_node_path_to(session: ChatSession, node_id: str) -> List[ChatNode]:
+    out: List[ChatNode] = []
+    current_id: Optional[str] = node_id
+    while current_id:
+        n = session.nodes.get(current_id)
+        if not n:
+            break
+        out.insert(0, n)
+        current_id = n.parent_id
+    return out
+
+
+def normalize_context_for_stream(session: ChatSession, user_node_id: str) -> List[Dict[str, str]]:
+    """合并文档/章节约束为单条 system，并拼接 user/assistant 轮；支持选区元数据。"""
+    path = get_node_path_to(session, user_node_id)
+    structural: List[ChatNode] = []
+    turns: List[ChatNode] = []
+    for n in path:
+        nk = (n.node_kind or "").strip()
+        if nk in ("doc_root", "chapter"):
+            structural.append(n)
+        elif n.role in (MessageRole.USER, MessageRole.ASSISTANT):
+            turns.append(n)
+    out: List[Dict[str, str]] = []
+    if structural:
+        parts: List[str] = []
+        for n in structural:
+            if n.node_kind == "doc_root":
+                title = (n.document_title or n.content or "").strip() or "文档"
+                parts.append(f"【阅读锚点-文档】{title}")
+            elif n.node_kind == "chapter":
+                pg = ""
+                if n.page_start is not None:
+                    if n.page_end is not None and n.page_end != n.page_start:
+                        pg = f" 第{n.page_start}–{n.page_end}页"
+                    else:
+                        pg = f" 第{n.page_start}页"
+                t = (n.content or "").strip() or "章节"
+                parts.append(f"【阅读锚点-章节{pg}】{t}")
+        out.append(
+            {
+                "role": MessageRole.SYSTEM,
+                "content": "当前对话在以下阅读上下文中；请结合章节与摘录回答用户。\n" + "\n".join(parts),
+            }
+        )
+    for n in turns:
+        c = n.content or ""
+        if n.role == MessageRole.USER and (n.quote_excerpt or "").strip():
+            q = (n.quote_excerpt or "").strip()
+            sp = n.source_page
+            prefix = "【选区"
+            if sp is not None:
+                try:
+                    prefix += f" 第{int(sp)}页"
+                except (TypeError, ValueError):
+                    pass
+            prefix += f"】\n{q}\n\n"
+            c = prefix + c
+        out.append({"role": n.role, "content": c})
+    return out
+
+
+def _session_pdf_dir(session_key: str) -> Path:
+    return (PDF_DIR / session_key).resolve()
+
+
+def parse_pdf_chapters(pdf_path: Path) -> Tuple[str, List[Dict[str, Any]]]:
+    """从 PDF 书签解析章节；无书签则单章「全文」。"""
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(pdf_path))
+    n_pages = len(reader.pages)
+    meta = reader.metadata
+    title = ""
+    if meta:
+        title = (str(meta.get("/Title", "") or meta.get("/title", "") or "")).strip()
+    if not title:
+        title = pdf_path.stem
+    flat: List[Tuple[str, int]] = []
+    outline = getattr(reader, "outline", None) or []
+
+    def dest_to_page_1based(dest: Any) -> int:
+        try:
+            n = int(reader.get_destination_page_number(dest))
+            return max(1, n + 1)
+        except Exception:
+            return 1
+
+    def walk(items: Any, _depth: int = 0) -> None:
+        if not items:
+            return
+        for item in items:
+            if isinstance(item, list):
+                walk(item, _depth + 1)
+            else:
+                try:
+                    p1 = dest_to_page_1based(item)
+                    t = str(getattr(item, "title", None) or item).strip()
+                    if t:
+                        flat.append((t, p1))
+                except Exception:
+                    pass
+
+    walk(outline)
+    chapters: List[Dict[str, Any]] = []
+    if flat:
+        for i, (t, p) in enumerate(flat):
+            p_end: int
+            if i + 1 < len(flat):
+                p_end = max(p, min(flat[i + 1][1] - 1, n_pages))
+            else:
+                p_end = n_pages
+            p_end = max(p, min(p_end, n_pages))
+            chapters.append(
+                {
+                    "title": t,
+                    "page_start": p,
+                    "page_end": p_end,
+                    "order": i,
+                }
+            )
+    else:
+        chapters.append(
+            {
+                "title": "全文",
+                "page_start": 1,
+                "page_end": n_pages,
+                "order": 0,
+            }
+        )
+    return title, chapters
+
+
+def build_document_chapter_tree(
+    session: ChatSession, doc_title: str, chapters: List[Dict[str, Any]]
+) -> None:
+    session.nodes.clear()
+    session.root_nodes.clear()
+    ts = datetime.now().timestamp()
+    doc_id = f"node_doc_{ts}"
+    doc_node = ChatNode(
+        id=doc_id,
+        parent_id=None,
+        role=MessageRole.SYSTEM,
+        content=doc_title,
+        node_kind="doc_root",
+        document_title=doc_title,
+        timestamp=ts,
+        status=NodeStatus.COMPLETED,
+    )
+    session.add_node(doc_node)
+    for ch in chapters:
+        oid = ch["order"]
+        cid = f"node_ch_{ts}_{oid}"
+        cnode = ChatNode(
+            id=cid,
+            parent_id=doc_id,
+            role=MessageRole.SYSTEM,
+            content=ch["title"],
+            node_kind="chapter",
+            chapter_order=oid,
+            page_start=ch.get("page_start"),
+            page_end=ch.get("page_end"),
+            timestamp=ts + 0.001 * (oid + 1),
+            status=NodeStatus.COMPLETED,
+        )
+        session.add_node(cnode)
+    persist_session(session)
+
+
+def get_or_load_session(session_key: str) -> Optional[ChatSession]:
+    s = sessions.get(session_key)
+    if s:
+        return s
+    loaded = load_session_from_disk(session_key)
+    if loaded:
+        sessions[session_key] = loaded
+        return loaded
+    return None
 
 # ============ API 端点 ============
 
@@ -672,6 +882,8 @@ class GetSessionResponse(BaseModel):
     session_key: str
     nodes: Dict[str, ChatNode]
     root_nodes: List[str]
+    has_pdf: bool = False
+    pdf_display_name: Optional[str] = None
 
 class SessionMeta(BaseModel):
     session_key: str
@@ -727,19 +939,82 @@ async def list_saved_sessions():
 @app.get("/api/sessions/{session_key}", response_model=GetSessionResponse)
 async def get_session(session_key: str):
     """获取会话数据（内存中无则从磁盘加载）。"""
-    session = sessions.get(session_key)
-    if not session:
-        loaded = load_session_from_disk(session_key)
-        if loaded:
-            sessions[session_key] = loaded
-            session = loaded
+    session = get_or_load_session(session_key)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     return GetSessionResponse(
         session_key=session.session_key,
         nodes=session.nodes,
-        root_nodes=session.root_nodes
+        root_nodes=session.root_nodes,
+        has_pdf=bool(session.pdf_stored_name),
+        pdf_display_name=session.pdf_display_name,
+    )
+
+
+@app.post("/api/sessions/{session_key}/pdf", response_model=GetSessionResponse)
+async def upload_session_pdf(session_key: str, file: UploadFile = File(...)):
+    """上传 PDF、解析书签为章节节点并持久化；仅允许尚无用户消息的会话。"""
+    session = get_or_load_session(session_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if any(n.role == MessageRole.USER for n in session.nodes.values()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="会话中已有用户对话，请新建会话后再上传 PDF。",
+        )
+    fname = (file.filename or "").strip()
+    if not fname.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="仅支持 .pdf 文件",
+        )
+    dest_dir = _session_pdf_dir(session_key)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    stored = "document.pdf"
+    dest_path = dest_dir / stored
+    raw = await file.read()
+    if len(raw) > int(os.getenv("PDF_MAX_BYTES", str(50 * 1024 * 1024))):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="文件过大",
+        )
+    dest_path.write_bytes(raw)
+    try:
+        doc_title, chapters = parse_pdf_chapters(dest_path)
+    except Exception as e:
+        if dest_path.is_file():
+            dest_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"无法解析 PDF: {e!s}",
+        ) from e
+    build_document_chapter_tree(session, doc_title, chapters)
+    session.pdf_stored_name = stored
+    session.pdf_display_name = fname
+    persist_session(session)
+    return GetSessionResponse(
+        session_key=session.session_key,
+        nodes=session.nodes,
+        root_nodes=session.root_nodes,
+        has_pdf=True,
+        pdf_display_name=session.pdf_display_name,
+    )
+
+
+@app.get("/api/sessions/{session_key}/pdf")
+async def download_session_pdf(session_key: str):
+    """返回本会话上传的 PDF 文件。"""
+    session = get_or_load_session(session_key)
+    if not session or not session.pdf_stored_name:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    path = _session_pdf_dir(session_key) / session.pdf_stored_name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="PDF file missing on disk")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=session.pdf_display_name or "document.pdf",
     )
 
 class CreateBranchRequest(BaseModel):
@@ -922,6 +1197,16 @@ async def handle_chat_message(websocket: WebSocket, session_key: str, message: D
     parent_node_id = message.get("parent_node_id")
     user_message = message.get("message")
     branch_label = message.get("branch_label")
+    quote_excerpt = message.get("quote_excerpt")
+    if quote_excerpt is not None:
+        quote_excerpt = str(quote_excerpt).strip()[:8000] or None
+    source_page_raw = message.get("source_page")
+    source_page: Optional[int] = None
+    if source_page_raw is not None:
+        try:
+            source_page = int(source_page_raw)
+        except (TypeError, ValueError):
+            source_page = None
 
     # 创建用户节点
     user_node_id = f"node_{datetime.now().timestamp()}"
@@ -932,7 +1217,9 @@ async def handle_chat_message(websocket: WebSocket, session_key: str, message: D
         content=user_message,
         branch_label=branch_label,
         timestamp=datetime.now().timestamp(),
-        status=NodeStatus.COMPLETED
+        status=NodeStatus.COMPLETED,
+        quote_excerpt=quote_excerpt,
+        source_page=source_page,
     )
     session.add_node(user_node)
     persist_session(session)
@@ -976,8 +1263,8 @@ async def handle_chat_message(websocket: WebSocket, session_key: str, message: D
         print(f"[DEBUG] LLM provider: {env.llm_provider}")
         print(f"[DEBUG] Model: {env.model_name}")
 
-        # 构建上下文
-        context = session.get_context_path(user_node_id)
+        # 构建上下文（合并章节/选区为单条 system + 多轮 user/assistant）
+        context = normalize_context_for_stream(session, user_node_id)
         print(f"[DEBUG] Context: {context}")
 
         headers = build_llm_headers(env)

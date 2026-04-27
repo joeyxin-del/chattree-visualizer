@@ -15,6 +15,8 @@ export type SessionSnapshot = {
   session_key: string;
   nodes: Record<string, ChatNode>;
   root_nodes: string[];
+  has_pdf?: boolean;
+  pdf_display_name?: string | null;
 };
 
 export interface WebSocketHandlers {
@@ -192,6 +194,31 @@ export async function fetchSessionSnapshot(
     throw new Error(`fetchSession failed: ${response.status} ${text}`);
   }
   return response.json();
+}
+
+export async function uploadSessionPdf(
+  sessionKey: string,
+  file: File
+): Promise<SessionSnapshot> {
+  const form = new FormData();
+  form.append('file', file);
+  const url = joinUrl(
+    getApiBase(),
+    `/api/sessions/${encodeURIComponent(sessionKey)}/pdf`
+  );
+  const response = await fetch(url, { method: 'POST', body: form });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`uploadSessionPdf failed: ${response.status} ${text}`);
+  }
+  return response.json();
+}
+
+export function sessionPdfUrl(sessionKey: string): string {
+  return joinUrl(
+    getApiBase(),
+    `/api/sessions/${encodeURIComponent(sessionKey)}/pdf`
+  );
 }
 
 export function rememberSessionKey(sessionKey: string) {

@@ -13,13 +13,15 @@ interface BranchVisualizerProps {
   onNodeClick: (nodeId: string) => void;
 }
 
-/** 一轮对话：用户气泡 + 助手回复，在缩略图中合并为一个胶囊 */
+/** 一轮对话：用户气泡 + 助手回复，在缩略图中合并为一个胶囊；或 PDF 文档根/章节点 */
 interface VisualTurn {
   id: string;
   userId: string | null;
   assistantId: string | null;
   userNode: ChatNode | null;
   assistantNode: ChatNode | null;
+  /** 与 doc_root / chapter 的 ChatNode 对应，不与 user/assistant 并存 */
+  structuralNode?: ChatNode | null;
   x: number;
   y: number;
   color: string;
@@ -79,6 +81,7 @@ function findAssistantChild(nodes: Map<string, ChatNode>, userId: string): strin
 }
 
 function turnSortTimestamp(t: VisualTurn): number {
+  if (t.structuralNode) return t.structuralNode.timestamp;
   return t.userNode?.timestamp ?? t.assistantNode?.timestamp ?? 0;
 }
 
@@ -89,11 +92,17 @@ function assignYByDepthAndTime(turns: VisualTurn[]): VisualTurn[] {
   for (const t of turns) {
     if (t.userId) byNode.set(t.userId, t);
     if (t.assistantId) byNode.set(t.assistantId, t);
+    if (t.structuralNode) byNode.set(t.structuralNode.id, t);
   }
   /** 对话链只跟「上一轮」走：有用户节点时只看 user.parent_id；勿用 assistant.parent_id 兜底（常指向同轮用户，会 map 回自己导致爆栈） */
   const parentTurn = (t: VisualTurn): VisualTurn | null => {
-    const pid =
-      t.userNode != null ? t.userNode.parent_id : (t.assistantNode?.parent_id ?? null);
+    let pid: string | null = null;
+    if (t.structuralNode) {
+      pid = t.structuralNode.parent_id;
+    } else {
+      pid =
+        t.userNode != null ? t.userNode.parent_id : (t.assistantNode?.parent_id ?? null);
+    }
     if (!pid) return null;
     const p = byNode.get(pid) ?? null;
     if (!p || p.id === t.id) return null;
@@ -203,6 +212,29 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
       if (!node) return;
       const x = LANE_X(branchIndex);
 
+      const k = (node.node_kind || '').trim();
+      if (k === 'doc_root' || k === 'chapter') {
+        const col =
+          k === 'doc_root' ? 'hsl(32 90% 42%)' : 'hsl(200 70% 42%)';
+        result.push({
+          id: `struct-${node.id}`,
+          userId: null,
+          assistantId: null,
+          userNode: null,
+          assistantNode: null,
+          structuralNode: node,
+          x,
+          y: 0,
+          color: col,
+          assistantColor: col,
+          branchIndex,
+        });
+        for (const cid of sortChildIdsByAge(nodes, node.children || [])) {
+          processFromNode(cid, branchIndex);
+        }
+        return;
+      }
+
       if (node.role === 'user') {
         const assistantId = findAssistantChild(nodes, node.id);
         const assistantNode = assistantId ? nodes.get(assistantId) ?? null : null;
@@ -290,6 +322,7 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
     for (const t of visualTurns) {
       if (t.userId) m.set(t.userId, t);
       if (t.assistantId) m.set(t.assistantId, t);
+      if (t.structuralNode) m.set(t.structuralNode.id, t);
     }
     return m;
   }, [visualTurns]);
@@ -297,14 +330,19 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
   const edges = useMemo(() => {
     const list: { from: VisualTurn; to: VisualTurn; inPath: boolean }[] = [];
     for (const to of visualTurns) {
-      const parentId = to.userNode?.parent_id ?? null;
+      const childNode = to.userNode ?? to.structuralNode;
+      if (!childNode) continue;
+      const parentId = childNode.parent_id;
       if (!parentId) continue;
       const from = turnByNodeId.get(parentId);
       if (!from) continue;
       const pathSet = new Set(currentBranchPath);
-      const edgeInPath =
-        pathSet.has(parentId) &&
-        (to.userId ? pathSet.has(to.userId) : false);
+      const childInPath = to.userId
+        ? pathSet.has(to.userId)
+        : to.structuralNode
+          ? pathSet.has(to.structuralNode.id)
+          : false;
+      const edgeInPath = pathSet.has(parentId) && childInPath;
       list.push({ from, to, inPath: edgeInPath });
     }
     return list;
@@ -409,14 +447,26 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
             }}
           >
             <defs>
-              {visualTurns.map((t) => (
-                <linearGradient key={`g-${t.id}`} id={`grad-${t.id}`} x1="0%" y1="0%" x2="100%" y2="0%">
-                  <stop offset="0%" stopColor={t.userNode ? t.color : MUTED} />
-                  <stop offset="50%" stopColor={t.userNode ? t.color : MUTED} />
-                  <stop offset="50%" stopColor={t.assistantNode ? t.assistantColor : MUTED} />
-                  <stop offset="100%" stopColor={t.assistantNode ? t.assistantColor : MUTED} />
-                </linearGradient>
-              ))}
+              {visualTurns.map((t) => {
+                const c0 = t.structuralNode
+                  ? t.color
+                  : t.userNode
+                    ? t.color
+                    : MUTED;
+                const c1 = t.structuralNode
+                  ? t.color
+                  : t.assistantNode
+                    ? t.assistantColor
+                    : MUTED;
+                return (
+                  <linearGradient key={`g-${t.id}`} id={`grad-${t.id}`} x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor={c0} />
+                    <stop offset="50%" stopColor={c0} />
+                    <stop offset="50%" stopColor={c1} />
+                    <stop offset="100%" stopColor={c1} />
+                  </linearGradient>
+                );
+              })}
             </defs>
 
             {edges.map(({ from, to, inPath }) => {
@@ -437,15 +487,23 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
 
             {visualTurns.map((t) => {
               const pathSet = new Set(currentBranchPath);
-              const inPath =
-                (t.userId && pathSet.has(t.userId)) ||
-                (t.assistantId && pathSet.has(t.assistantId));
+              const inPath = t.structuralNode
+                ? pathSet.has(t.structuralNode.id)
+                : (t.userId && pathSet.has(t.userId)) || (t.assistantId && pathSet.has(t.assistantId));
               const lastId = currentBranchPath[currentBranchPath.length - 1];
-              const isCurrent =
-                (t.userId && lastId === t.userId) || (t.assistantId && lastId === t.assistantId);
+              const isCurrent = t.structuralNode
+                ? lastId === t.structuralNode.id
+                : (t.userId && lastId === t.userId) || (t.assistantId && lastId === t.assistantId);
               const isHovered = hoveredTurn === t.id;
-              const previewText = getTurnPreviewText(t.userNode, t.assistantNode);
-              const w = 30;
+              const sn = t.structuralNode;
+              const previewText = sn
+                ? (sn.node_kind === 'doc_root'
+                  ? `文档：${(sn.content || '').slice(0, 100)}`
+                  : `章：${(sn.content || '').slice(0, 100)}${
+                    sn.page_start != null ? ` · p.${sn.page_start}` : ''
+                  }`)
+                : getTurnPreviewText(t.userNode, t.assistantNode);
+              const w = t.structuralNode ? 34 : 30;
               const h = 18;
               const rx = 9;
               /** 透明命中区略大于药丸+当前外圈；梗概为 Portal 到 body，避免在 svg 里用 Radix 不弹层 */
@@ -455,6 +513,10 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
 
               const handlePillClick = (e: MouseEvent<SVGRectElement>) => {
                 e.stopPropagation();
+                if (t.structuralNode) {
+                  onNodeClick(t.structuralNode.id);
+                  return;
+                }
                 const svg = (e.currentTarget as SVGElement).ownerSVGElement;
                 if (!svg) return;
                 const pt = svg.createSVGPoint();
@@ -536,6 +598,17 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
                     </rect>
                   </g>
 
+                  {t.structuralNode && (
+                    <text
+                      x={t.x}
+                      y={t.y + 1}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      className="text-[8px] fill-white font-bold pointer-events-none"
+                    >
+                      {t.structuralNode.node_kind === 'doc_root' ? '文' : '章'}
+                    </text>
+                  )}
                   {t.userNode && (
                     <text
                       x={t.x - 7}
@@ -558,7 +631,7 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
                       A
                     </text>
                   )}
-                  {!t.userNode && t.assistantNode && (
+                  {!t.userNode && t.assistantNode && !t.structuralNode && (
                     <text
                       x={t.x}
                       y={t.y + 1}

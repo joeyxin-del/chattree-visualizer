@@ -7,13 +7,16 @@ import {
   fetchSessionSnapshot,
   rememberSessionKey,
   getStoredSessionKey,
+  uploadSessionPdf,
+  sessionPdfUrl,
   type SessionListItem,
 } from '../hooks/useWebSocket';
 import { BranchVisualizer } from './BranchVisualizer';
 import { ChatView } from './ChatView';
+import { PdfReaderPanel } from './PdfReaderPanel';
 import { Button } from './ui/button';
 import type { ChatNode } from '../types';
-import { History, Plus, Send, Settings, Sparkles } from 'lucide-react';
+import { FileUp, History, Plus, Send, Settings, Sparkles } from 'lucide-react';
 
 function formatSessionTime(ts: number) {
   try {
@@ -46,6 +49,16 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyItems, setHistoryItems] = useState<SessionListItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [hasPdf, setHasPdf] = useState(false);
+  const [pdfName, setPdfName] = useState<string | null>(null);
+  const [pdfPanelOpen, setPdfPanelOpen] = useState(true);
+  const [pdfUploading, setPdfUploading] = useState(false);
+  const [activeQuote, setActiveQuote] = useState<{
+    excerpt: string;
+    page: number;
+    parentId: string;
+  } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const wsHandlers = useMemo(
     () => ({
@@ -96,6 +109,8 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
           hydrateSession(snap.nodes, snap.root_nodes);
           setSessionKey(snap.session_key);
           rememberSessionKey(snap.session_key);
+          setHasPdf(Boolean(snap.has_pdf));
+          setPdfName(snap.pdf_display_name ?? null);
           return;
         } catch {
           /* 本地记录的会话可能已被删或后端未就绪，回落为新建 */
@@ -107,6 +122,8 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
         clearNodes();
         setSessionKey(key);
         rememberSessionKey(key);
+        setHasPdf(false);
+        setPdfName(null);
       } catch (err) {
         console.error(
           '无法创建会话。后端是否在 :8000 运行？（可运行 start-backend.cmd）',
@@ -128,6 +145,8 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
       setCurrentNodeId(null);
       followLatestRef.current = true;
       setHistoryOpen(false);
+      setHasPdf(false);
+      setPdfName(null);
     } catch (err) {
       console.error('新建会话失败', err);
     }
@@ -143,6 +162,8 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
         setCurrentNodeId(null);
         followLatestRef.current = true;
         setHistoryOpen(false);
+        setHasPdf(Boolean(snap.has_pdf));
+        setPdfName(snap.pdf_display_name ?? null);
       } catch (err) {
         console.error('打开会话失败', err);
       }
@@ -171,19 +192,77 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
     return currentBranchPath.map(id => nodes.get(id)).filter(Boolean) as ChatNode[];
   }, [currentBranchPath, nodes]);
 
+  const getParentIdForPdfPage = useCallback(
+    (page: number) => {
+      let best: ChatNode | undefined;
+      for (const n of nodes.values()) {
+        if (n.node_kind === 'chapter' && n.page_start != null && n.page_end != null) {
+          if (page >= n.page_start && page <= n.page_end) {
+            if (!best || (n.chapter_order ?? 0) > (best.chapter_order ?? -1)) {
+              best = n;
+            }
+          }
+        }
+      }
+      if (best) return best.id;
+      const r0 = rootNodes[0] ? nodes.get(rootNodes[0]) : undefined;
+      if (r0?.node_kind === 'doc_root') return r0.id;
+      return null;
+    },
+    [nodes, rootNodes]
+  );
+
+  const handleBeginQuoteBranch = useCallback(
+    (excerpt: string, page: number) => {
+      const pid = getParentIdForPdfPage(page) ?? currentNodeId;
+      if (!pid) return;
+      setActiveQuote({ excerpt, page, parentId: pid });
+      setInputMessage('请结合以上摘录回答：\n\n');
+    },
+    [getParentIdForPdfPage, currentNodeId]
+  );
+
   // 发送消息
   const handleSendMessage = useCallback(() => {
     if (!inputMessage.trim()) return;
 
     followLatestRef.current = true;
+    const q = activeQuote;
+    const parent = q?.parentId ?? currentNodeId;
     sendMessage({
       type: 'chat',
-      parent_node_id: currentNodeId,
+      parent_node_id: parent,
       message: inputMessage,
+      quote_excerpt: q?.excerpt,
+      source_page: q?.page,
     });
+    setActiveQuote(null);
 
     setInputMessage('');
-  }, [inputMessage, currentNodeId, sendMessage]);
+  }, [inputMessage, currentNodeId, sendMessage, activeQuote]);
+
+  const onPdfFileChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const f = e.target.files?.[0];
+      e.target.value = '';
+      if (!f || !sessionKey) return;
+      setPdfUploading(true);
+      try {
+        const snap = await uploadSessionPdf(sessionKey, f);
+        hydrateSession(snap.nodes, snap.root_nodes);
+        setHasPdf(Boolean(snap.has_pdf));
+        setPdfName(snap.pdf_display_name ?? f.name);
+        setPdfPanelOpen(true);
+        setCurrentNodeId(null);
+        followLatestRef.current = true;
+      } catch (err) {
+        console.error('上传 PDF 失败', err);
+      } finally {
+        setPdfUploading(false);
+      }
+    },
+    [sessionKey, hydrateSession]
+  );
 
   // 切换到某个节点
   const handleNodeClick = useCallback((nodeId: string) => {
@@ -227,18 +306,34 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
     pendingBranchRef.current = null;
   }, [nodes]);
 
-  // 自动选择最新的叶子节点
+  // 自动选择当前节点：有对话时跟最新一轮；仅章节树时取最后一章
   useEffect(() => {
-    if (!currentNodeId && nodes.size > 0) {
-      // 找到最新的叶子节点
-      const allNodes = Array.from(nodes.values());
-      const leafNodes = allNodes.filter(node => !node.children || node.children.length === 0);
-      if (leafNodes.length > 0) {
-        const latestLeaf = leafNodes.reduce((latest, node) =>
-          node.timestamp > latest.timestamp ? node : latest
-        );
-        setCurrentNodeId(latestLeaf.id);
-      }
+    if (currentNodeId || nodes.size === 0) return;
+    const withTurns = Array.from(nodes.values()).filter(
+      (n) => n.role === 'user' || n.role === 'assistant'
+    );
+    if (withTurns.length > 0) {
+      const latest = withTurns.reduce((a, b) => (a.timestamp > b.timestamp ? a : b));
+      setCurrentNodeId(latest.id);
+      return;
+    }
+    const chapterLeaves = Array.from(nodes.values()).filter(
+      (n) => n.node_kind === 'chapter' && (!n.children || n.children.length === 0)
+    );
+    if (chapterLeaves.length > 0) {
+      const pick = chapterLeaves.reduce((a, b) =>
+        (a.chapter_order ?? 0) > (b.chapter_order ?? 0) ? a : b
+      );
+      setCurrentNodeId(pick.id);
+      return;
+    }
+    const allNodes = Array.from(nodes.values());
+    const leafNodes = allNodes.filter((node) => !node.children || node.children.length === 0);
+    if (leafNodes.length > 0) {
+      const latestLeaf = leafNodes.reduce((latest, node) =>
+        node.timestamp > latest.timestamp ? node : latest
+      );
+      setCurrentNodeId(latestLeaf.id);
     }
   }, [nodes, currentNodeId]);
 
@@ -322,6 +417,37 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
                 </div>
               ) : null}
             </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              accept=".pdf,application/pdf"
+              onChange={onPdfFileChange}
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="gap-1.5"
+              title={hasPdf ? (pdfName ? `已加载：${pdfName}` : '已加载 PDF') : '上传 PDF 生成分支'}
+              disabled={!sessionKey || pdfUploading || hasPdf}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <FileUp className="w-4 h-4" />
+              {pdfUploading ? '上传中…' : '上传 PDF'}
+            </Button>
+            {hasPdf && sessionKey ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="hidden lg:inline-flex"
+                onClick={() => setPdfPanelOpen((o) => !o)}
+                title="切换右侧阅读器"
+              >
+                {pdfPanelOpen ? '隐藏阅读' : '打开阅读'}
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant="default"
@@ -332,8 +458,15 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
               <Plus className="w-4 h-4" />
               新对话
             </Button>
-            <div className="text-xs text-muted-foreground whitespace-nowrap">
-              {nodes.size} 节点 · {rootNodes.length} 根
+            <div className="text-xs text-muted-foreground whitespace-nowrap flex flex-col items-end gap-0.5">
+              <span>
+                {nodes.size} 节点 · {rootNodes.length} 根
+              </span>
+              {hasPdf ? (
+                <span className="text-[10px] text-muted-foreground/90 lg:hidden">
+                  宽屏可显示 PDF 侧栏
+                </span>
+              ) : null}
             </div>
           </div>
         </div>
@@ -358,7 +491,7 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
         />
 
         {/* 中间：对话视图（min-h-0 让子项可收缩，聊天区才能出现纵向滚动） */}
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ChatView
             messages={currentMessages}
             onSubmitBranchFromMessage={handleSubmitBranchFromMessage}
@@ -398,12 +531,33 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
                   <Send className="w-5 h-5" />
                 </Button>
               </div>
+              {activeQuote ? (
+                <p className="text-xs text-amber-800 dark:text-amber-200 mt-1 text-center">
+                  下一条将附带第 {activeQuote.page} 页选区；发送后自动清除
+                  <button
+                    type="button"
+                    className="ml-2 underline"
+                    onClick={() => setActiveQuote(null)}
+                  >
+                    取消选区
+                  </button>
+                </p>
+              ) : null}
               <p className="text-xs text-muted-foreground mt-2 text-center">
                 💡 将鼠标移到某条用户或助手消息上，在气泡下点击「新建分支」
               </p>
             </div>
           </div>
         </div>
+        {hasPdf && sessionKey ? (
+          <PdfReaderPanel
+            open={pdfPanelOpen}
+            onOpenChange={setPdfPanelOpen}
+            pdfUrl={sessionPdfUrl(sessionKey)}
+            onBeginQuoteBranch={handleBeginQuoteBranch}
+            storageKey={sessionKey}
+          />
+        ) : null}
       </div>
     </div>
   );

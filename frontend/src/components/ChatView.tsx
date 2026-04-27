@@ -3,7 +3,7 @@ import type { ChatNode } from '../types';
 import { stripInferenceBlocksForDisplay } from '../utils/messageDisplay';
 import { ScrollArea } from './ui/scroll-area';
 import { Button } from './ui/button';
-import { User, Bot, GitBranch, Send } from 'lucide-react';
+import { User, Bot, GitBranch, Send, BookMarked, FileText } from 'lucide-react';
 
 interface ChatViewProps {
   messages: ChatNode[];
@@ -73,6 +73,41 @@ export function ChatView({ messages, onSubmitBranchFromMessage }: ChatViewProps)
             </div>
           ) : (
             messages.map((msg) => {
+              if (msg.node_kind === 'doc_root' || msg.node_kind === 'chapter') {
+                const isDoc = msg.node_kind === 'doc_root';
+                return (
+                  <div
+                    key={msg.id}
+                    className="flex w-full max-w-4xl mx-auto justify-center"
+                  >
+                    <div className="inline-flex max-w-full items-start gap-3 rounded-xl border border-dashed border-primary/25 bg-muted/30 px-4 py-3 text-left text-sm text-foreground shadow-sm">
+                      <div
+                        className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+                          isDoc ? 'bg-amber-500/20 text-amber-800' : 'bg-sky-500/20 text-sky-900'
+                        }`}
+                      >
+                        {isDoc ? <FileText className="h-4 w-4" /> : <BookMarked className="h-4 w-4" />}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium text-muted-foreground">
+                          {isDoc ? '阅读文档' : '章节锚点'}
+                        </p>
+                        <p className="mt-1 whitespace-pre-wrap font-medium leading-relaxed">{msg.content || ''}</p>
+                        {msg.node_kind === 'chapter' && (msg.page_start != null || msg.page_end != null) && (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            约第 {msg.page_start ?? '?'}{' '}
+                            {msg.page_end != null && msg.page_end !== msg.page_start
+                              ? `–${msg.page_end} `
+                              : ''}
+                            页
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+
               const isUser = msg.role === 'user';
               const rawContent = msg.content || '';
               const displayContent = isUser
@@ -112,6 +147,13 @@ export function ChatView({ messages, onSubmitBranchFromMessage }: ChatViewProps)
                         : 'bg-card text-card-foreground border rounded-tl-sm'
                     }`}
                   >
+                    {isUser && (msg.quote_excerpt || '').trim() && (
+                      <div className="mb-2 border-l-2 border-primary-foreground/50 pl-2 text-left text-xs opacity-90 leading-snug">
+                        {msg.source_page != null ? <span>第 {msg.source_page} 页 · </span> : null}
+                        {(msg.quote_excerpt || '').slice(0, 500)}
+                        {(msg.quote_excerpt || '').length > 500 ? '…' : ''}
+                      </div>
+                    )}
                     <div className="whitespace-pre-wrap select-text text-sm leading-relaxed">
                       {isUser ? (
                         displayContent || (
