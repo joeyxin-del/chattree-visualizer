@@ -40,9 +40,8 @@ Thumbs.db
 # Persisted chat sessions + llm_config.json (local BYOK)
 backend/data/
 
-# Personal design (Word) under docs/; keep local only, do not publish
-docs/**/*.docx
-docs/*.docx
+# docs/: local only, do not publish
+docs/
 
 # Build
 *.pyc
