@@ -44,6 +44,13 @@ STREAM_PERSIST_INTERVAL_SEC = float(
     or "1.0"
 )
 
+DATA_DIR = PERSIST_DIR.parent
+LLM_CONFIG_PATH = Path(
+    os.getenv("LLM_CONFIG_FILE", str(DATA_DIR / "llm_config.json"))
+).resolve()
+
+_ALLOWED_FILE_PROVIDERS = frozenset({"openai_compat", "anthropic"})
+
 
 def _persist_path(session_key: str) -> Path:
     if ".." in session_key or "/" in session_key or "\\" in session_key:
@@ -211,8 +218,55 @@ def _resolve_http_proxy() -> Optional[str]:
     return None
 
 
-def get_llm_env() -> LlmEnv:
-    """从环境变量解析当前 LLM 提供商与凭据。缺失时 raise ValueError（与历史行为一致）。"""
+def _mask_api_key(key: str) -> str:
+    k = (key or "").strip()
+    if len(k) <= 8:
+        return "********" if k else ""
+    return f"{k[:4]}…{k[-4:]}"
+
+
+def _read_llm_config_disk() -> Optional[Dict[str, Any]]:
+    if not LLM_CONFIG_PATH.is_file():
+        return None
+    try:
+        data = json.loads(LLM_CONFIG_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        print(f"[WARN] _read_llm_config_disk: {e}", flush=True)
+        return None
+
+
+def _write_llm_config_disk(payload: Dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    path = LLM_CONFIG_PATH
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _disk_llm_override() -> Optional[LlmEnv]:
+    """若本机 llm_config.json 含有效 Key 与字段，则覆盖环境变量。"""
+    data = _read_llm_config_disk()
+    if not data:
+        return None
+    key = (data.get("api_key") or "").strip()
+    prov = (data.get("llm_provider") or "").strip().lower()
+    base = (data.get("base_url") or "").strip().rstrip("/")
+    model = (data.get("model_name") or "").strip()
+    if not key or prov not in _ALLOWED_FILE_PROVIDERS or not base or not model:
+        return None
+    return LlmEnv(
+        llm_provider=prov,
+        base_url=base,
+        model_name=model,
+        api_key=key,
+        proxy=_resolve_http_proxy(),
+    )
+
+
+def _get_llm_env_from_env() -> LlmEnv:
+    """仅从环境变量解析（历史行为）。"""
     openai_base = (os.getenv("OPENAI_BASE_URL") or "").strip()
     if openai_base:
         llm_provider = "openai_compat"
@@ -262,6 +316,14 @@ def get_llm_env() -> LlmEnv:
         api_key=api_key,
         proxy=_resolve_http_proxy(),
     )
+
+
+def get_llm_env() -> LlmEnv:
+    """优先本机保存的 llm_config.json；无效或未配置 Key 时回退环境变量。"""
+    override = _disk_llm_override()
+    if override:
+        return override
+    return _get_llm_env_from_env()
 
 
 def build_llm_headers(env: LlmEnv) -> Dict[str, str]:
@@ -505,6 +567,92 @@ class ChatSession:
         return path
 
 # ============ API 端点 ============
+
+
+class LlmConfigPublic(BaseModel):
+    llm_provider: Optional[str] = None
+    base_url: Optional[str] = None
+    model_name: Optional[str] = None
+    api_key_configured: bool = False
+    api_key_hint: Optional[str] = None
+
+
+class LlmConfigUpdate(BaseModel):
+    clear_api_key: bool = False
+    llm_provider: Optional[str] = None
+    base_url: Optional[str] = None
+    model_name: Optional[str] = None
+    api_key: Optional[str] = None
+
+
+def _public_from_disk() -> LlmConfigPublic:
+    data = _read_llm_config_disk()
+    if not data:
+        return LlmConfigPublic()
+    key = (data.get("api_key") or "").strip()
+    has_key = bool(key)
+    return LlmConfigPublic(
+        llm_provider=data.get("llm_provider"),
+        base_url=data.get("base_url"),
+        model_name=data.get("model_name"),
+        api_key_configured=has_key,
+        api_key_hint=_mask_api_key(key) if has_key else None,
+    )
+
+
+@app.get("/api/llm-config", response_model=LlmConfigPublic)
+async def get_llm_config():
+    """返回本机保存的 LLM 配置（API Key 仅掩码）。"""
+    return _public_from_disk()
+
+
+@app.put("/api/llm-config", response_model=LlmConfigPublic)
+async def put_llm_config(body: LlmConfigUpdate):
+    """保存或清除本机 LLM 配置；保存时若未传新 api_key 则保留文件中已有 Key。"""
+    if body.clear_api_key:
+        if LLM_CONFIG_PATH.is_file():
+            LLM_CONFIG_PATH.unlink()
+        return _public_from_disk()
+    if not body.llm_provider or not body.base_url or not body.model_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="llm_provider, base_url and model_name are required",
+        )
+    prov = body.llm_provider.strip().lower()
+    if prov not in _ALLOWED_FILE_PROVIDERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="llm_provider must be openai_compat or anthropic",
+        )
+    base = body.base_url.strip().rstrip("/")
+    model = body.model_name.strip()
+    if not base or not model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="base_url and model_name must be non-empty",
+        )
+    existing = _read_llm_config_disk() or {}
+    api_key_final = (existing.get("api_key") or "").strip()
+    if body.api_key is not None and body.api_key.strip():
+        api_key_final = body.api_key.strip()
+    if not api_key_final:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "API key is required; omit api_key to keep the existing key, "
+                "or use clear_api_key to remove saved config and fall back to env"
+            ),
+        )
+    _write_llm_config_disk(
+        {
+            "llm_provider": prov,
+            "base_url": base,
+            "model_name": model,
+            "api_key": api_key_final,
+        }
+    )
+    return _public_from_disk()
+
 
 class CreateSessionRequest(BaseModel):
     session_key: Optional[str] = None

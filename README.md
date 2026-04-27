@@ -19,6 +19,14 @@ Tree Visualizer 是一个通用的树形结构可视化工具，旨在为 Molt-P
 2. [架构设计](./docs/02-架构设计.md) - 系统架构、模块设计、数据流
 3. [原型设计](./docs/03-原型设计.md) - UI/UX 设计、交互设计、视觉规范
 
+### 本地运行与模型配置（ChatTree）
+
+1. 启动后端（默认监听 `http://127.0.0.1:8000`）：可在 `backend` 目录使用 `.env`，或仅通过网页配置（见下）。
+2. 启动前端：在 `frontend` 目录执行 `npm run dev`（默认 `http://localhost:5173`）。
+3. **模型与 API Key**：在界面右上角打开「**模型设置**」，可选择 MiniMax（OpenAI 兼容）、OpenAI 或 Claude，填写 Base URL、模型与 API Key 并保存。配置持久化到 `backend/data/llm_config.json`，与会话数据同属 `backend/data/`，已被 `.gitignore` 忽略。
+4. **配置优先级**：当 `llm_config.json` 中存在有效 API Key 且提供商为 `openai_compat` 或 `anthropic` 时，**优先使用该文件**中的 Base URL 与模型；否则**回退到环境变量**（参见 `backend/.env.example`，如 `OPENAI_BASE_URL` + `OPENAI_API_KEY`，或 `API_BASE_URL` + `LLM_PROVIDER` + 对应 Key）。在设置页「清除已保存的 Key」会删除该文件，从而重新采用环境变量。
+5. 可选环境变量 **`LLM_CONFIG_FILE`**：覆盖默认的 `llm_config.json` 路径。
+
 ### 技术栈
 
 ```
@@ -165,4 +173,4 @@ tree-visualizer/
 
 ---
 
-**最后更新**：2026-03-16
+**最后更新**：2026-04-27

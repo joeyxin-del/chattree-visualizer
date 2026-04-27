@@ -13,7 +13,7 @@ import { BranchVisualizer } from './BranchVisualizer';
 import { ChatView } from './ChatView';
 import { Button } from './ui/button';
 import type { ChatNode } from '../types';
-import { History, Plus, Send, Sparkles } from 'lucide-react';
+import { History, Plus, Send, Settings, Sparkles } from 'lucide-react';
 
 function formatSessionTime(ts: number) {
   try {
@@ -28,7 +28,7 @@ function formatSessionTime(ts: number) {
   }
 }
 
-export function ChatTreeView() {
+export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }) {
   const {
     nodes,
     rootNodes,
@@ -261,6 +261,18 @@ export function ChatTreeView() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {onOpenSettings ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                onClick={onOpenSettings}
+              >
+                <Settings className="w-4 h-4" />
+                模型设置
+              </Button>
+            ) : null}
             <div className="relative z-50">
               <Button
                 type="button"
