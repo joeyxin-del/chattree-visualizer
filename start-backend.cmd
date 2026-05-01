@@ -6,6 +6,14 @@ echo.
 
 cd /d "%~dp0backend"
 
+python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>nul
+if errorlevel 1 (
+    echo ERROR: Backend requires Python 3.10 or newer ^(Docling / PyTorch^).
+    echo Install from https://www.python.org/ and ensure `python` points to 3.10+.
+    pause
+    exit /b 1
+)
+
 REM venv is created ONLY when this folder is missing. It is reused on every later run.
 REM There is a single backend\venv; nothing here creates duplicate virtualenvs.
 if not exist "venv\Scripts\python.exe" (

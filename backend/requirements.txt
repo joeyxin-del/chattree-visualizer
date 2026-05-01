@@ -1,8 +1,19 @@
+# Python 3.10+ required (Docling / PyTorch wheels).
+# PyTorch: CPU wheels from PyTorch (pair versions; transformers/Docling need torch>=2.4).
+# The +cpu builds are resolved via --extra-index-url, not the default PyPI wheel set.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.4.1+cpu
+torchvision==0.19.1+cpu
+# Avoid numpy 2.x with older torch extensions on Windows; aligns with torchvision stack.
+numpy>=1.26,<2
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
 anthropic>=0.40.0
 python-dotenv==1.0.1
+websockets>=14.0,<17.0
 pydantic==2.9.0
-websockets==13.1
 pypdf>=5.0.0
+pymupdf>=1.24.0
 python-multipart>=0.0.9
+# Docling: install from PyPI (standard PDF pipeline), not as git submodule.
+docling>=2.92.0,<3.0.0

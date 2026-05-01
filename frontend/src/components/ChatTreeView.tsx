@@ -8,6 +8,7 @@ import {
   rememberSessionKey,
   getStoredSessionKey,
   uploadSessionPdf,
+  inferSessionChapters,
   sessionPdfUrl,
   type SessionListItem,
 } from '../hooks/useWebSocket';
@@ -16,7 +17,7 @@ import { ChatView } from './ChatView';
 import { PdfReaderPanel } from './PdfReaderPanel';
 import { Button } from './ui/button';
 import type { ChatNode } from '../types';
-import { FileUp, History, Plus, Send, Settings, Sparkles } from 'lucide-react';
+import { FileUp, History, Plus, Send, Settings, Sparkles, BookMarked } from 'lucide-react';
 
 function formatSessionTime(ts: number) {
   try {
@@ -53,6 +54,7 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
   const [pdfName, setPdfName] = useState<string | null>(null);
   const [pdfPanelOpen, setPdfPanelOpen] = useState(true);
   const [pdfUploading, setPdfUploading] = useState(false);
+  const [inferChaptersLoading, setInferChaptersLoading] = useState(false);
   const [activeQuote, setActiveQuote] = useState<{
     excerpt: string;
     page: number;
@@ -187,6 +189,19 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
     return path;
   }, [currentNodeId, nodes]);
 
+  const hasUserMessages = useMemo(
+    () => Array.from(nodes.values()).some((n) => n.role === 'user'),
+    [nodes]
+  );
+
+  const showInferChaptersButton = useMemo(() => {
+    const chapters = Array.from(nodes.values()).filter(
+      (n) => n.node_kind === 'chapter'
+    );
+    if (chapters.length !== 1) return false;
+    return (chapters[0].content ?? '').trim() === '全文';
+  }, [nodes]);
+
   // 获取当前分支的消息列表
   const currentMessages = useMemo(() => {
     return currentBranchPath.map(id => nodes.get(id)).filter(Boolean) as ChatNode[];
@@ -263,6 +278,23 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
     },
     [sessionKey, hydrateSession]
   );
+
+  const onInferChapters = useCallback(async () => {
+    if (!sessionKey) return;
+    setInferChaptersLoading(true);
+    try {
+      const snap = await inferSessionChapters(sessionKey);
+      hydrateSession(snap.nodes, snap.root_nodes);
+      setHasPdf(Boolean(snap.has_pdf));
+      setPdfName(snap.pdf_display_name ?? null);
+      setCurrentNodeId(null);
+      followLatestRef.current = true;
+    } catch (err) {
+      console.error('智能解析章节失败', err);
+    } finally {
+      setInferChaptersLoading(false);
+    }
+  }, [sessionKey, hydrateSession]);
 
   // 切换到某个节点
   const handleNodeClick = useCallback((nodeId: string) => {
@@ -436,6 +468,23 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
               <FileUp className="w-4 h-4" />
               {pdfUploading ? '上传中…' : '上传 PDF'}
             </Button>
+            {hasPdf &&
+            sessionKey &&
+            !hasUserMessages &&
+            showInferChaptersButton ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                title="无书签时用本地规则推断章节（将替换当前章节树）"
+                disabled={inferChaptersLoading}
+                onClick={() => void onInferChapters()}
+              >
+                <BookMarked className="w-4 h-4" />
+                {inferChaptersLoading ? '解析中…' : '智能解析章节'}
+              </Button>
+            ) : null}
             {hasPdf && sessionKey ? (
               <Button
                 type="button"

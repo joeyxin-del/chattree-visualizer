@@ -27,6 +27,14 @@ Tree Visualizer 是一个通用的树形结构可视化工具，旨在为 Molt-P
 4. **配置优先级**：当 `llm_config.json` 中存在有效 API Key 且提供商为 `openai_compat` 或 `anthropic` 时，**优先使用该文件**中的 Base URL 与模型；否则**回退到环境变量**（参见 `backend/.env.example`，如 `OPENAI_BASE_URL` + `OPENAI_API_KEY`，或 `API_BASE_URL` + `LLM_PROVIDER` + 对应 Key）。在设置页「清除已保存的 Key」会删除该文件，从而重新采用环境变量。
 5. 可选环境变量 **`LLM_CONFIG_FILE`**：覆盖默认的 `llm_config.json` 路径。
 
+### 后端 Python 与 Docling（PDF 结构 / 智能解析章节）
+
+- **Python 版本须为 3.10+**（与 [Docling](https://github.com/docling-project/docling) 一致）。根目录 `start-backend.cmd` 会在进入 venv 前做一次版本检查。
+- 依赖统一写在 **`backend/requirements.txt`**。Docling 作为 **PyPI 包**（`docling>=2.92,<3`）安装即可；**不建议**把 Docling 做成 git submodule，否则无法正确管理其传递依赖（torch、docling-core 等）。
+- **首次安装或启动**：Docling 会在预热阶段下载**版面/layout**等模型到本机缓存，需预留磁盘与网络；时间可能较长，属正常现象。
+- 当前集成策略（见 `backend/pdf_docling_toc.py`）：**StandardPdf 标准管道**、**仅 CPU**（`DOCLING_DEVICE=cpu`）、关闭 **OCR**、**表格结构**、**公式/代码增强**以及页图/内嵌大图导出；**未启用 VLM**。启动时默认在 **lifespan** 中同步预热 Docling，避免首次点击「智能解析章节」才拉权重；若在开发时希望尽快起服务，可在 `.env` 中设置 **`TREE_SKIP_DOCLING_WARMUP=1`**。若机器无法加载 PyTorch（例如 Windows 缺少 VC++ 运行库导致 `c10.dll` 报错），可设 **`TREE_DISABLE_DOCLING=1`**，将仅使用 `pdf_heuristic_toc.py` 启发式。
+- **智能解析章节** API：优先使用 Docling 抽取 `section_header`；若失败或检测到的章节少于 2 个，自动 **回退** 到原有启发式。
+
 ### 技术栈
 
 ```

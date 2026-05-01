@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,12 +10,53 @@ import json
 import os
 import re
 import time
+import asyncio
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 import httpx
 
+from pdf_heuristic_toc import infer_chapters_heuristic, read_pdf_metadata_title
+
 load_dotenv()
 
-app = FastAPI(title="Tree Visualizer API")
+
+def _warmup_docling_at_startup() -> None:
+    try:
+        from pdf_docling_toc import warmup_docling
+
+        warmup_docling()
+    except Exception as e:
+        msg = str(e).lower()
+        if "c10.dll" in msg or "1114" in msg or (
+            getattr(e, "winerror", None) == 1114
+        ):
+            print(
+                "[WARN] PyTorch/DLL failed to load (Docling needs torch). On Windows, "
+                "install x64 \"Microsoft Visual C++ Redistributable\" (latest), "
+                "then reinstall: pip install --force-reinstall torch. "
+                "Until then, smart chapter parse uses heuristic only. "
+                "Optional: TREE_DISABLE_DOCLING=1 in .env to skip this step.",
+                flush=True,
+            )
+        else:
+            print(
+                f"[WARN] Docling 启动预热失败，智能解析将回退到启发式: {e!s}",
+                flush=True,
+            )
+
+
+@asynccontextmanager
+async def _app_lifespan(app: FastAPI):
+    if os.getenv("TREE_SKIP_DOCLING_WARMUP", "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        await asyncio.to_thread(_warmup_docling_at_startup)
+    yield
+
+
+app = FastAPI(title="Tree Visualizer API", lifespan=_app_lifespan)
 
 # CORS 配置
 app.add_middleware(
@@ -780,6 +821,8 @@ def get_or_load_session(session_key: str) -> Optional[ChatSession]:
 
 
 class LlmConfigPublic(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     llm_provider: Optional[str] = None
     base_url: Optional[str] = None
     model_name: Optional[str] = None
@@ -788,6 +831,8 @@ class LlmConfigPublic(BaseModel):
 
 
 class LlmConfigUpdate(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     clear_api_key: bool = False
     llm_provider: Optional[str] = None
     base_url: Optional[str] = None
@@ -993,6 +1038,58 @@ async def upload_session_pdf(session_key: str, file: UploadFile = File(...)):
     session.pdf_stored_name = stored
     session.pdf_display_name = fname
     persist_session(session)
+    return GetSessionResponse(
+        session_key=session.session_key,
+        nodes=session.nodes,
+        root_nodes=session.root_nodes,
+        has_pdf=True,
+        pdf_display_name=session.pdf_display_name,
+    )
+
+
+@app.post(
+    "/api/sessions/{session_key}/chapters/infer",
+    response_model=GetSessionResponse,
+)
+async def infer_session_chapters(session_key: str):
+    """无书签 PDF：优先 Docling 版面章节，失败或不足则回退启发式。须已有 PDF 且无用户消息。"""
+    session = get_or_load_session(session_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if any(n.role == MessageRole.USER for n in session.nodes.values()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="会话中已有用户对话，请新建会话后再使用智能解析章节。",
+        )
+    stored = session.pdf_stored_name
+    if not stored:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    dest_path = _session_pdf_dir(session_key) / stored
+    if not dest_path.is_file():
+        raise HTTPException(status_code=404, detail="PDF file missing on disk")
+
+    chapters: Optional[List[Dict[str, Any]]] = None
+    try:
+        from pdf_docling_toc import infer_chapters_docling
+
+        chapters = infer_chapters_docling(dest_path)
+    except Exception as e:
+        print(f"[WARN] Docling 章节解析失败，回退启发式: {e}", flush=True)
+        chapters = None
+
+    if chapters is None:
+        try:
+            chapters = infer_chapters_heuristic(dest_path)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"无法解析 PDF: {e!s}",
+            ) from e
+    fallback = (session.pdf_display_name or "").strip() or dest_path.stem
+    doc_title = (read_pdf_metadata_title(dest_path, fallback) or "").strip()
+    if not doc_title:
+        doc_title = fallback
+    build_document_chapter_tree(session, doc_title, chapters)
     return GetSessionResponse(
         session_key=session.session_key,
         nodes=session.nodes,

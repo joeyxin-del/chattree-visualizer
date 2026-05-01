@@ -214,6 +214,21 @@ export async function uploadSessionPdf(
   return response.json();
 }
 
+export async function inferSessionChapters(
+  sessionKey: string
+): Promise<SessionSnapshot> {
+  const url = joinUrl(
+    getApiBase(),
+    `/api/sessions/${encodeURIComponent(sessionKey)}/chapters/infer`
+  );
+  const response = await fetch(url, { method: 'POST' });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`inferSessionChapters failed: ${response.status} ${text}`);
+  }
+  return response.json();
+}
+
 export function sessionPdfUrl(sessionKey: string): string {
   return joinUrl(
     getApiBase(),
