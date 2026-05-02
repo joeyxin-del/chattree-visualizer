@@ -3,6 +3,7 @@ import type { ChatNode } from '../types';
 import { stripInferenceBlocksForDisplay } from '../utils/messageDisplay';
 import { ScrollArea } from './ui/scroll-area';
 import { Button } from './ui/button';
+import { MarkdownMessage } from './MarkdownMessage';
 import { User, Bot, GitBranch, Send, BookMarked, FileText } from 'lucide-react';
 
 interface ChatViewProps {
@@ -154,7 +155,13 @@ export function ChatView({ messages, onSubmitBranchFromMessage }: ChatViewProps)
                         {(msg.quote_excerpt || '').length > 500 ? '…' : ''}
                       </div>
                     )}
-                    <div className="whitespace-pre-wrap select-text text-sm leading-relaxed">
+                    <div
+                      className={
+                        isUser
+                          ? 'whitespace-pre-wrap select-text text-sm leading-relaxed'
+                          : 'select-text'
+                      }
+                    >
                       {isUser ? (
                         displayContent || (
                           <span className="italic opacity-50 flex items-center gap-2">
@@ -163,13 +170,13 @@ export function ChatView({ messages, onSubmitBranchFromMessage }: ChatViewProps)
                           </span>
                         )
                       ) : msg.status === 'streaming' && !displayContent.trim() ? (
-                        <span className="italic opacity-50 flex items-center gap-2">
+                        <span className="italic opacity-50 flex items-center gap-2 text-sm leading-relaxed">
                           <span className="inline-block w-2 h-2 bg-current rounded-full animate-pulse"></span>
                           生成中...
                         </span>
-                      ) : (
-                        displayContent || null
-                      )}
+                      ) : displayContent ? (
+                        <MarkdownMessage>{displayContent}</MarkdownMessage>
+                      ) : null}
                     </div>
                   </div>
 
