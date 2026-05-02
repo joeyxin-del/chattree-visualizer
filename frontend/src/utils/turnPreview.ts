@@ -5,7 +5,7 @@ const DEFAULT_MAX_CHARS = 100;
 
 /**
  * 节点悬停「梗概」：优先本轮用户问题截断，否则助手内容；有分支名时前缀 `分支名 · `。
- * 与 docs/07 中「规则/截断、无大模型时也可用」一致。
+ * 规则：截断展示；不依赖大模型。
  */
 export function getTurnPreviewText(
   userNode: ChatNode | null,

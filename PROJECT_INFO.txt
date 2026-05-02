@@ -10,7 +10,7 @@ E:\002project\014moltbot\tree-visualizer
 📦 包含内容：
   ✓ 前端 (React + TypeScript + React Flow)
   ✓ 后端 (FastAPI + Claude API)
-  ✓ 完整文档
+  ✓ README 与启动说明
   ✓ 启动脚本
 
 🚀 快速启动：
@@ -36,7 +36,6 @@ E:\002project\014moltbot\tree-visualizer
   README_DEMO.md      - 项目说明
   QUICKSTART.md       - 快速启动指南
   API_KEY_SETUP.md    - API Key 配置
-  docs/               - 详细技术文档
 
 🌐 访问地址：
   ----------------

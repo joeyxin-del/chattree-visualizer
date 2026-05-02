@@ -5,8 +5,7 @@
 ```
 tree-visualizer/
 ├── frontend/          # React 前端
-├── backend/           # FastAPI 后端
-└── docs/             # 文档
+└── backend/           # FastAPI 后端
 ```
 
 ## 环境要求

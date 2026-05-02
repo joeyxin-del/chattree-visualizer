@@ -168,7 +168,6 @@ tree-visualizer/
 │   ├── main.py           # 主程序 ✓
 │   ├── .env              # API Key ✓
 │   └── requirements.txt
-├── docs/                  # 技术文档
 ├── start-all.cmd         # 一键启动
 ├── START_HERE.md         # 开始指南
 └── BACKEND_RUNNING.md    # 本文件
@@ -184,7 +183,6 @@ tree-visualizer/
 3. 体验树形对话的魅力！
 
 ### 深入了解
-- 查看 `docs/` 目录的技术文档
 - 阅读 `README_DEMO.md` 了解更多功能
 - 探索 API 文档 http://localhost:8000/docs
 

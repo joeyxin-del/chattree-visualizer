@@ -93,7 +93,6 @@ python main.py
 - README_DEMO.md - 完整项目说明
 - QUICKSTART.md - 快速启动指南
 - API_KEY_SETUP.md - API Key 配置
-- docs/ - 详细技术文档
 
 ---
 

@@ -2,8 +2,6 @@
 
 一个支持分支对话的树形可视化工具，让你的 AI 对话更加灵活和高效。
 
-![Demo](docs/demo-screenshot.png)
-
 ## ✨ 特性
 
 - 🌲 **树形对话结构** - 可视化展示对话的分支关系
@@ -111,10 +109,6 @@ tree-visualizer/
 │   ├── main.py              # 主程序
 │   ├── requirements.txt     # Python 依赖
 │   └── .env                 # 环境变量
-├── docs/                     # 文档
-│   ├── 01-技术选型.md
-│   ├── 02-架构设计.md
-│   └── 03-原型设计.md
 ├── start-all.cmd            # 一键启动脚本
 ├── start-backend.cmd        # 后端启动脚本
 ├── start-frontend.cmd       # 前端启动脚本
@@ -175,14 +169,6 @@ CORS_ORIGINS=http://localhost:5173,http://localhost:3000
 - [ ] 导出为图片
 - [ ] 搜索和过滤
 - [ ] WorkTree 可视化
-
-## 📝 开发文档
-
-详细的技术文档请查看 `docs/` 目录：
-
-- [技术选型](docs/01-技术选型.md)
-- [架构设计](docs/02-架构设计.md)
-- [原型设计](docs/03-原型设计.md)
 
 ## 🤝 贡献
 
