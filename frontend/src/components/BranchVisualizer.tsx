@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } fr
 import { createPortal } from 'react-dom';
 import type { ChatNode } from '../types';
 import { getTurnPreviewText } from '../utils/turnPreview';
+import { structuralPillLabel } from '../utils/chapterPillLabel';
 import { GitBranch } from 'lucide-react';
 import { useChatTreeStore } from '../store/chatTreeStore';
 import { fetchBranchSummary } from '../api/branchSummary';
@@ -229,8 +230,23 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
           assistantColor: col,
           branchIndex,
         });
-        for (const cid of sortChildIdsByAge(nodes, node.children || [])) {
-          processFromNode(cid, branchIndex);
+        const kids = sortChildIdsByAge(nodes, node.children || []);
+        if (k === 'doc_root') {
+          // 主竖轨：仅章节沿 trunk；挂在文档根下的对话另占新轨
+          for (const cid of kids) {
+            const cnode = nodes.get(cid);
+            const ck = (cnode?.node_kind || '').trim();
+            if (ck === 'chapter') {
+              processFromNode(cid, branchIndex);
+            } else {
+              processFromNode(cid, forkSerial++);
+            }
+          }
+        } else {
+          // 章节锚点下的对话：从该章横向叉出（新 branchIndex），避免与 trunk 叠在同一竖线且被排到全书章节之后
+          for (const cid of kids) {
+            processFromNode(cid, forkSerial++);
+          }
         }
         return;
       }
@@ -308,6 +324,12 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
       processFromNode(rootId, index);
     });
 
+    const hasPdfDocRoot = result.some(
+      (t) => t.structuralNode?.node_kind === 'doc_root'
+    );
+    if (hasPdfDocRoot) {
+      return result.map((t, i) => ({ ...t, y: ROW_TOP + i * ROW_STEP }));
+    }
     return assignYByDepthAndTime(result);
   }, [nodes, rootNodes]);
 
@@ -347,6 +369,47 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
     }
     return list;
   }, [visualTurns, turnByNodeId, currentBranchPath]);
+
+  /**
+   * PDF 主竖轨：数据上各 § 是 doc_root 的并列子节点（星形），若逐条画 doc→§k Bezier，
+   * 会在同列重叠成一根「粗线」，且 in-path 用父色（橘）与离径用灰叠在一起发污。
+   * 这里用一条中性色、在药丸之间的短竖段串联「文 → §1 → …」，不穿心；另隐藏原 doc→§ 边。
+   */
+  const pdfStructuralTrunkD = useMemo(() => {
+    const hasDoc = visualTurns.some((t) => t.structuralNode?.node_kind === 'doc_root');
+    if (!hasDoc) return null;
+    const trunk = visualTurns
+      .filter(
+        (t) =>
+          t.structuralNode &&
+          (t.structuralNode.node_kind === 'doc_root' ||
+            t.structuralNode.node_kind === 'chapter') &&
+          t.branchIndex === 0
+      )
+      .sort((a, b) => a.y - b.y);
+    if (trunk.length < 2) return null;
+    const x = trunk[0].x;
+    const pillHalf = 9;
+    const gap = 3;
+    const parts: string[] = [];
+    for (let i = 0; i < trunk.length - 1; i++) {
+      const y0 = trunk[i].y + pillHalf + gap;
+      const y1 = trunk[i + 1].y - pillHalf - gap;
+      if (y1 > y0) parts.push(`M ${x} ${y0} L ${x} ${y1}`);
+    }
+    return parts.length > 0 ? parts.join(' ') : null;
+  }, [visualTurns]);
+
+  const branchEdges = useMemo(
+    () =>
+      edges.filter(({ from, to }) => {
+        const fk = from.structuralNode?.node_kind;
+        const tk = to.structuralNode?.node_kind;
+        if (fk === 'doc_root' && tk === 'chapter') return false;
+        return true;
+      }),
+    [edges]
+  );
 
   const branchSummaryMarkers = useMemo(() => {
     const m = new Map<number, VisualTurn[]>();
@@ -469,7 +532,19 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
               })}
             </defs>
 
-            {edges.map(({ from, to, inPath }) => {
+            {pdfStructuralTrunkD ? (
+              <path
+                d={pdfStructuralTrunkD}
+                fill="none"
+                stroke="hsl(var(--muted-foreground))"
+                strokeWidth={2}
+                strokeLinecap="round"
+                opacity={0.38}
+                style={{ pointerEvents: 'none' }}
+              />
+            ) : null}
+
+            {branchEdges.map(({ from, to, inPath }) => {
               const d = curvedBranchEdgePath(from, to);
               return (
                 <path
@@ -496,14 +571,16 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
                 : (t.userId && lastId === t.userId) || (t.assistantId && lastId === t.assistantId);
               const isHovered = hoveredTurn === t.id;
               const sn = t.structuralNode;
+              const pillMeta = sn ? structuralPillLabel(sn) : null;
               const previewText = sn
                 ? (sn.node_kind === 'doc_root'
-                  ? `文档：${(sn.content || '').slice(0, 100)}`
-                  : `章：${(sn.content || '').slice(0, 100)}${
+                  ? `FILE：${(sn.content || '').slice(0, 100)}`
+                  : `${pillMeta?.label ?? '?'}：${(sn.content || '').slice(0, 100)}${
                     sn.page_start != null ? ` · p.${sn.page_start}` : ''
                   }`)
                 : getTurnPreviewText(t.userNode, t.assistantNode);
-              const w = t.structuralNode ? 34 : 30;
+              const w = pillMeta?.width ?? 30;
+              const structuralLabel = pillMeta?.label ?? '';
               const h = 18;
               const rx = 9;
               /** 透明命中区略大于药丸+当前外圈；梗概为 Portal 到 body，避免在 svg 里用 Radix 不弹层 */
@@ -604,9 +681,9 @@ export function BranchVisualizer({ nodes, rootNodes, currentBranchPath, onNodeCl
                       y={t.y + 1}
                       textAnchor="middle"
                       dominantBaseline="middle"
-                      className="text-[8px] fill-white font-bold pointer-events-none"
+                      className="text-[8px] fill-white font-bold pointer-events-none tracking-tight"
                     >
-                      {t.structuralNode.node_kind === 'doc_root' ? '文' : '章'}
+                      {structuralLabel}
                     </text>
                   )}
                   {t.userNode && (

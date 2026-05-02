@@ -338,7 +338,23 @@ export function PdfReaderPanel({
   }, [toolbar, onBeginQuoteBranch, closeToolbar]);
 
   if (!open) {
-    return null;
+    return (
+      <div
+        className="pdf-reader-viewer--collapsed hidden lg:flex border-l border-border/80 bg-muted/20 flex-col items-center shrink-0 w-11 min-h-0 py-2 gap-2"
+        aria-label="PDF 阅读器已收起"
+      >
+        <Button
+          type="button"
+          variant="secondary"
+          size="icon"
+          className="h-9 w-9 shrink-0"
+          onClick={() => onOpenChange(true)}
+          title="打开 PDF 阅读"
+        >
+          <BookOpen className="w-4 h-4" />
+        </Button>
+      </div>
+    );
   }
 
   return (

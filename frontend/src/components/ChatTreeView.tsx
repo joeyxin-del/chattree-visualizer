@@ -19,7 +19,7 @@ import { ChatView } from './ChatView';
 import { PdfReaderPanel } from './PdfReaderPanel';
 import { Button } from './ui/button';
 import type { ChatNode } from '../types';
-import { FileUp, History, Plus, Send, Settings, Sparkles, BookMarked } from 'lucide-react';
+import { FileUp, History, Plus, Send, Settings, Sparkles, BookMarked, BookOpen } from 'lucide-react';
 
 function formatSessionTime(ts: number) {
   try {
@@ -607,11 +607,15 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
                 type="button"
                 variant="outline"
                 size="sm"
-                className="hidden lg:inline-flex"
+                className="inline-flex gap-1 shrink-0"
                 onClick={() => setPdfPanelOpen((o) => !o)}
-                title="切换右侧阅读器"
+                title="切换右侧 PDF 阅读器（与侧栏收起条相同）"
               >
-                {pdfPanelOpen ? '隐藏阅读' : '打开阅读'}
+                <BookOpen className="w-4 h-4" />
+                <span className="hidden sm:inline">
+                  {pdfPanelOpen ? '隐藏阅读' : '打开阅读'}
+                </span>
+                <span className="sm:hidden">PDF</span>
               </Button>
             ) : null}
             <Button
