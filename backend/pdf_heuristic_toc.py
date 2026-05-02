@@ -1,11 +1,12 @@
 """
 本地启发式：从英文双栏论文等 PDF 推断章节（无 LLM）。依赖 PyMuPDF（fitz）。
 
-统一规则（仅两类约束 + 一份词表，无零散过滤）：
+统一规则：
   1) 词表 — 整行（不分大小写）等于常见节名，或整行「词表词 + 冒号」；
   2) 序标 + 标题尾 — 行首为固定罗马数字表，或「论文章节式」阿拉伯编号，
      且冒号后/序标后的标题必须以英文大写字母起头、长度合规。
      阿拉伯编号用一条文法描述：每段数字首位为 1–9（杜绝 0.06、前导零、四位年份）。
+  3) 与 Docling 共用 pdf_chapter_filters：剔除典型作者/单位/科技公司署名行。
 """
 from __future__ import annotations
 
@@ -14,6 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import fitz
+
+from pdf_chapter_filters import is_likely_author_or_affiliation_line
 
 TITLE_MAX_LEN = 120
 FULL_WIDTH_FRAC = 0.48
@@ -177,6 +180,8 @@ def infer_chapters_heuristic(pdf_path: Path) -> List[Dict[str, Any]]:
                 continue
             t = _normalize_chapter_title(text)
             if not t or t == prev_title:
+                continue
+            if is_likely_author_or_affiliation_line(t):
                 continue
             if prev_title and (t in prev_title or prev_title in t):
                 if len(t) < len(prev_title):

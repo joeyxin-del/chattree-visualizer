@@ -7,6 +7,8 @@ import {
   fetchSessionSnapshot,
   rememberSessionKey,
   getStoredSessionKey,
+  clearStoredSessionKey,
+  deleteSession,
   uploadSessionPdf,
   inferSessionChapters,
   sessionPdfUrl,
@@ -50,6 +52,10 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyItems, setHistoryItems] = useState<SessionListItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historySelectedKeys, setHistorySelectedKeys] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [historyDeleting, setHistoryDeleting] = useState(false);
   const [hasPdf, setHasPdf] = useState(false);
   const [pdfName, setPdfName] = useState<string | null>(null);
   const [pdfPanelOpen, setPdfPanelOpen] = useState(true);
@@ -97,6 +103,10 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
   useEffect(() => {
     if (historyOpen) loadHistoryList();
   }, [historyOpen, loadHistoryList]);
+
+  useEffect(() => {
+    if (historyOpen) setHistorySelectedKeys(new Set());
+  }, [historyOpen]);
 
   // 初始化：优先恢复 localStorage 中的会话，否则新建（数据由后端 JSON 持久化）
   useEffect(() => {
@@ -172,6 +182,42 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
     },
     [hydrateSession, setSessionKey]
   );
+
+  const handleDeleteSelectedSessions = useCallback(async () => {
+    if (historySelectedKeys.size === 0 || historyDeleting) return;
+    const n = historySelectedKeys.size;
+    if (!window.confirm(`确定删除所选的 ${n} 个会话？此操作不可恢复。`)) return;
+
+    const keys = [...historySelectedKeys];
+    const cur = sessionKey;
+    setHistoryDeleting(true);
+    try {
+      const results = await Promise.allSettled(keys.map((k) => deleteSession(k)));
+      const failed = results.filter((r) => r.status === 'rejected');
+      if (failed.length > 0) {
+        console.error('删除会话失败', failed);
+        alert(`有 ${failed.length} 项删除失败，请查看控制台。`);
+      }
+      await loadHistoryList();
+
+      const curIdx = cur != null ? keys.indexOf(cur) : -1;
+      const currentRemoved =
+        curIdx >= 0 && results[curIdx]?.status === 'fulfilled';
+      if (currentRemoved) {
+        clearStoredSessionKey();
+        await handleNewChat();
+      }
+    } finally {
+      setHistorySelectedKeys(new Set());
+      setHistoryDeleting(false);
+    }
+  }, [
+    historySelectedKeys,
+    historyDeleting,
+    sessionKey,
+    loadHistoryList,
+    handleNewChat,
+  ]);
 
   // 获取当前分支路径
   const currentBranchPath = useMemo(() => {
@@ -413,8 +459,54 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
               </Button>
               {historyOpen ? (
                 <div className="absolute right-0 top-full mt-2 w-[min(100vw-2rem,22rem)] rounded-xl border bg-card shadow-lg">
-                  <div className="border-b px-3 py-2 text-xs font-medium text-muted-foreground">
-                    已保存的会话
+                  <div className="flex flex-col gap-2 border-b px-3 py-2">
+                    <div className="text-xs font-medium text-muted-foreground">
+                      已保存的会话
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs"
+                        disabled={
+                          historyLoading || historyItems.length === 0 || historyDeleting
+                        }
+                        onClick={() =>
+                          setHistorySelectedKeys(
+                            new Set(historyItems.map((i) => i.session_key))
+                          )
+                        }
+                      >
+                        全选
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs"
+                        disabled={
+                          historyLoading || historyItems.length === 0 || historyDeleting
+                        }
+                        onClick={() => setHistorySelectedKeys(new Set())}
+                      >
+                        取消全选
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        className="h-7 text-xs"
+                        disabled={
+                          historyLoading ||
+                          historySelectedKeys.size === 0 ||
+                          historyDeleting
+                        }
+                        onClick={() => void handleDeleteSelectedSessions()}
+                      >
+                        {historyDeleting ? '删除中…' : '删除所选'}
+                      </Button>
+                    </div>
                   </div>
                   <div className="max-h-72 overflow-y-auto p-1">
                     {historyLoading ? (
@@ -427,22 +519,47 @@ export function ChatTreeView({ onOpenSettings }: { onOpenSettings?: () => void }
                       </p>
                     ) : (
                       historyItems.map((item) => (
-                        <button
+                        <div
                           key={item.session_key}
-                          type="button"
-                          onClick={() => handleOpenHistorySession(item.session_key)}
-                          className={`flex w-full flex-col gap-0.5 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
-                            item.session_key === sessionKey ? 'bg-muted/80' : ''
-                          }`}
+                          className="flex items-start gap-2 rounded-lg px-2 py-1"
                         >
-                          <span className="line-clamp-2 text-foreground">
-                            {item.preview || '（空会话）'}
-                          </span>
-                          <span className="text-[10px] text-muted-foreground">
-                            {formatSessionTime(item.updated_at)} · {item.node_count}{' '}
-                            个节点
-                          </span>
-                        </button>
+                          <input
+                            type="checkbox"
+                            className="mt-2.5 size-4 shrink-0 rounded border-input accent-primary"
+                            checked={historySelectedKeys.has(item.session_key)}
+                            disabled={historyDeleting}
+                            onChange={() => {
+                              setHistorySelectedKeys((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(item.session_key)) {
+                                  next.delete(item.session_key);
+                                } else {
+                                  next.add(item.session_key);
+                                }
+                                return next;
+                              });
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleOpenHistorySession(item.session_key)
+                            }
+                            disabled={historyDeleting}
+                            className={`flex min-w-0 flex-1 flex-col gap-0.5 rounded-lg px-2 py-2 text-left text-sm transition-colors hover:bg-muted disabled:opacity-50 ${
+                              item.session_key === sessionKey ? 'bg-muted/80' : ''
+                            }`}
+                          >
+                            <span className="line-clamp-2 text-foreground">
+                              {item.preview || '（空会话）'}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground">
+                              {formatSessionTime(item.updated_at)} · {item.node_count}{' '}
+                              个节点
+                            </span>
+                          </button>
+                        </div>
                       ))
                     )}
                   </div>

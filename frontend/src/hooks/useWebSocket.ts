@@ -181,6 +181,18 @@ export async function listSessions(): Promise<SessionListItem[]> {
   return data.sessions ?? [];
 }
 
+export async function deleteSession(sessionKey: string): Promise<void> {
+  const url = joinUrl(
+    getApiBase(),
+    `/api/sessions/${encodeURIComponent(sessionKey)}`
+  );
+  const response = await fetch(url, { method: 'DELETE' });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`deleteSession failed: ${response.status} ${text}`);
+  }
+}
+
 export async function fetchSessionSnapshot(
   sessionKey: string
 ): Promise<SessionSnapshot> {
@@ -249,5 +261,13 @@ export function getStoredSessionKey(): string | null {
     return localStorage.getItem(LAST_SESSION_STORAGE_KEY);
   } catch {
     return null;
+  }
+}
+
+export function clearStoredSessionKey() {
+  try {
+    localStorage.removeItem(LAST_SESSION_STORAGE_KEY);
+  } catch {
+    /* ignore */
   }
 }

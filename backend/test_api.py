@@ -45,6 +45,23 @@ def test_get_session(session_key):
         print(f"✗ 获取会话失败: {e}")
         return False
 
+def test_delete_session(session_key):
+    """测试删除会话后无法再 GET"""
+    try:
+        r = requests.delete(f"{BASE_URL}/api/sessions/{session_key}")
+        if r.status_code != 204:
+            print(f"✗ 删除会话应返回 204，实际 {r.status_code}: {r.text}")
+            return False
+        r2 = requests.get(f"{BASE_URL}/api/sessions/{session_key}")
+        if r2.status_code != 404:
+            print(f"✗ 删除后会话 GET 应 404，实际 {r2.status_code}")
+            return False
+        print("✓ 删除会话测试: 204，随后 GET 404")
+        return True
+    except Exception as e:
+        print(f"✗ 删除会话失败: {e}")
+        return False
+
 def main():
     print("=" * 50)
     print("ChatTree Visualizer - 后端 API 测试")
@@ -86,6 +103,11 @@ def main():
         print(f"✗ 分支摘要校验测试失败: {e}")
     except Exception as e:
         print(f"✗ 分支摘要请求失败: {e}")
+
+    print()
+
+    if not test_delete_session(session_key):
+        return
 
     print()
     print("=" * 50)

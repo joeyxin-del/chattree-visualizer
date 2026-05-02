@@ -19,6 +19,8 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from pdf_chapter_filters import is_likely_author_or_affiliation_line
+
 _lock = threading.Lock()
 _converter: Any = None
 # Windows 上 PyTorch c10.dll 加载失败（WinError 1114）时置位，本进程内不再尝试 Docling。
@@ -200,6 +202,8 @@ def infer_chapters_docling(pdf_path: Path) -> Optional[List[Dict[str, Any]]]:
             continue
         title = (getattr(item, "text", None) or "").strip()
         if not title:
+            continue
+        if is_likely_author_or_affiliation_line(title):
             continue
         prov = getattr(item, "prov", None) or []
         if not prov:

@@ -1,6 +1,6 @@
 from fastapi import FastAPI, File, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 import json
 import os
+import shutil
 import re
 import time
 import asyncio
@@ -995,6 +996,36 @@ async def get_session(session_key: str):
         has_pdf=bool(session.pdf_stored_name),
         pdf_display_name=session.pdf_display_name,
     )
+
+
+@app.delete("/api/sessions/{session_key}")
+async def delete_saved_session(session_key: str):
+    """删除持久化会话：内存、WebSocket、JSON 与 PDF 目录（幂等，始终 204）。"""
+    try:
+        path = _persist_path(session_key)
+    except HTTPException:
+        raise
+
+    sessions.pop(session_key, None)
+
+    ws = active_connections.pop(session_key, None)
+    if ws is not None:
+        try:
+            await ws.close(code=1001, reason="session_deleted")
+        except Exception:
+            pass
+
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError as e:
+        print(f"[WARN] delete session json failed: {e}", flush=True)
+
+    pdf_dir = _session_pdf_dir(session_key)
+    if pdf_dir.is_dir():
+        shutil.rmtree(pdf_dir, ignore_errors=True)
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/api/sessions/{session_key}/pdf", response_model=GetSessionResponse)
